@@ -63,7 +63,7 @@ MAX_OUTPUT_TOKENS_ANALYST = 1500
 # Change these to swap prompt versions without code changes.
 # Old prompts stay in prompts/ folder for easy rollback.
 ACTIVE_PROMPTS = {
-    "analyst": "v1_analyst.txt",
+    "analyst": "v2_analyst.txt",
     "filter": "v1_filter.txt",
     "weekly_review": "v1_weekly_review.txt",
     "trade_report": "v1_trade_report.txt",
