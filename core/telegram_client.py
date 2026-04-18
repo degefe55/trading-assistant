@@ -31,11 +31,51 @@ def send_message(text: str, parse_mode: str = "HTML", disable_preview: bool = Tr
             },
             timeout=15,
         )
-        r.raise_for_status()
+        # Always capture Telegram's own error message, not just HTTP status
+        if not r.ok:
+            try:
+                tg_err = r.json()
+                description = tg_err.get("description", "no description")
+                error_code = tg_err.get("error_code", r.status_code)
+                log_event("ERROR", "telegram",
+                          f"Send failed: [{error_code}] {description}",
+                          data={"chat_id_masked": str(TELEGRAM_CHAT_ID)[:3] + "***",
+                                "first_100_chars": text[:100]})
+            except Exception:
+                log_event("ERROR", "telegram", f"Send failed: HTTP {r.status_code}")
+            # Fallback: try sending as plain text if HTML parsing was the issue
+            if parse_mode == "HTML":
+                log_event("INFO", "telegram", "Retrying as plain text...")
+                return _send_plain_fallback(text)
+            return False
         log_event("INFO", "telegram", f"Sent message ({len(text)} chars)")
         return True
     except Exception as e:
-        log_event("ERROR", "telegram", f"Send failed: {e}")
+        log_event("ERROR", "telegram", f"Send exception: {e}")
+        return False
+
+
+def _send_plain_fallback(html_text: str) -> bool:
+    """Strip HTML tags and retry as plain text. Last-ditch attempt."""
+    import re
+    plain = re.sub(r"<[^>]+>", "", html_text)
+    plain = plain.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    try:
+        r = requests.post(
+            f"{TG_BASE}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": plain,
+                  "disable_web_page_preview": True},
+            timeout=15,
+        )
+        if r.ok:
+            log_event("INFO", "telegram", "Plain text fallback succeeded")
+            return True
+        tg_err = r.json() if r.content else {}
+        log_event("ERROR", "telegram",
+                  f"Plain text also failed: {tg_err.get('description', r.status_code)}")
+        return False
+    except Exception as e:
+        log_event("ERROR", "telegram", f"Plain fallback exception: {e}")
         return False
 
 
