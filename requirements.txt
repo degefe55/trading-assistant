@@ -1,0 +1,10 @@
+# Core
+anthropic>=0.40.0
+requests>=2.32.0
+
+# Google Sheets
+gspread>=6.0.0
+google-auth>=2.30.0
+
+# Timezone handling (stdlib in Python 3.9+, but backport for safety)
+tzdata>=2024.1
