@@ -25,9 +25,11 @@ on:
           - "true"
           - "false"
 
-  # Scheduled runs - each brief gets its own cron
-  # Using dedicated crons instead of shared polling so each brief type
-  # is explicitly scheduled and won't fall through to wrong type if delayed
+  # Scheduled runs - each brief gets its own cron line.
+  # Brief type is derived from github.event.schedule (the exact cron string
+  # that triggered the run), so GitHub Actions cron delays (often 15-30+ min)
+  # DO NOT cause misclassification. Previously we used wall-clock time, which
+  # silently fell through to 'test' on delayed runs -> no Telegram brief.
   schedule:
     # KSA 3:30 PM = UTC 12:30 - premarket brief
     - cron: "30 12 * * 1-5"
@@ -57,33 +59,38 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Determine brief type from schedule (tolerant to cron delays)
+      - name: Determine brief type from triggering cron
         id: brief
+        env:
+          TRIGGERING_CRON: ${{ github.event.schedule }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BRIEF_TYPE: ${{ github.event.inputs.brief_type }}
+          INPUT_MOCK_MODE: ${{ github.event.inputs.mock_mode }}
         run: |
-          if [ "${{ github.event_name }}" == "schedule" ]; then
-            # Use hour ranges to tolerate GitHub cron delays up to ~30 min
-            # Each brief only fires once per day because schedule only triggers near target
-            HOUR=$(date -u +'%H')
-            MIN=$(date -u +'%M')
-            # Convert to total minutes from start of day for range matching
-            TOTAL_MIN=$((10#$HOUR * 60 + 10#$MIN))
-            # Target times in minutes: 12:30=750, 16:30=990, 19:30=1170, 20:00=1200
-            if   [ $TOTAL_MIN -ge 745 ] && [ $TOTAL_MIN -le 790 ]; then
-              echo "brief_type=premarket" >> $GITHUB_OUTPUT
-            elif [ $TOTAL_MIN -ge 985 ] && [ $TOTAL_MIN -le 1030 ]; then
-              echo "brief_type=midsession" >> $GITHUB_OUTPUT
-            elif [ $TOTAL_MIN -ge 1165 ] && [ $TOTAL_MIN -le 1195 ]; then
-              echo "brief_type=preclose" >> $GITHUB_OUTPUT
-            elif [ $TOTAL_MIN -ge 1196 ] && [ $TOTAL_MIN -le 1230 ]; then
-              echo "brief_type=eod" >> $GITHUB_OUTPUT
-            else
-              # Shouldn't normally happen - fallback is harmless test mode
-              echo "brief_type=test" >> $GITHUB_OUTPUT
-            fi
-            echo "mock_mode=false" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          echo "Event: $EVENT_NAME"
+          echo "Triggering cron: '${TRIGGERING_CRON:-<none>}'"
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            # Map the exact cron string to a brief type. This is immune to
+            # GitHub cron execution delays because we're matching the schedule
+            # entry that fired, not the current wall-clock time.
+            case "$TRIGGERING_CRON" in
+              "30 12 * * 1-5") BRIEF="premarket" ;;
+              "30 16 * * 1-5") BRIEF="midsession" ;;
+              "30 19 * * 1-5") BRIEF="preclose"  ;;
+              "0 20 * * 1-5")  BRIEF="eod"       ;;
+              *)
+                echo "::error::Unrecognized cron: '$TRIGGERING_CRON'. Update the case statement if you added a new cron."
+                exit 1
+                ;;
+            esac
+            echo "brief_type=$BRIEF" >> "$GITHUB_OUTPUT"
+            echo "mock_mode=false"   >> "$GITHUB_OUTPUT"
+            echo "Resolved brief_type=$BRIEF (from schedule)"
           else
-            echo "brief_type=${{ github.event.inputs.brief_type }}" >> $GITHUB_OUTPUT
-            echo "mock_mode=${{ github.event.inputs.mock_mode }}" >> $GITHUB_OUTPUT
+            echo "brief_type=$INPUT_BRIEF_TYPE" >> "$GITHUB_OUTPUT"
+            echo "mock_mode=$INPUT_MOCK_MODE"   >> "$GITHUB_OUTPUT"
+            echo "Resolved brief_type=$INPUT_BRIEF_TYPE (manual)"
           fi
 
       - name: Run trading bot
