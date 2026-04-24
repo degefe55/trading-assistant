@@ -1,3 +1,9 @@
+# ============================================================================
+# Trading Bot Workflow
+# Re-registered: 2026-04-24 (fixes GitHub schedule-not-registered bug)
+# If the Actions tab ever shows only "workflow_dispatch event trigger"
+# and no "schedule event", bump the date above and commit to re-register.
+# ============================================================================
 name: Trading Bot
 
 on:
@@ -28,8 +34,7 @@ on:
   # Scheduled runs - each brief gets its own cron line.
   # Brief type is derived from github.event.schedule (the exact cron string
   # that triggered the run), so GitHub Actions cron delays (often 15-30+ min)
-  # DO NOT cause misclassification. Previously we used wall-clock time, which
-  # silently fell through to 'test' on delayed runs -> no Telegram brief.
+  # DO NOT cause misclassification.
   schedule:
     # KSA 3:30 PM = UTC 12:30 - premarket brief
     - cron: "30 12 * * 1-5"
