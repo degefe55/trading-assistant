@@ -1,7 +1,9 @@
 """
 Command handler for Telegram bot interactions.
 Parses /buy /sell /pnl /status /pause /resume /help commands.
-Run periodically by GitHub Actions to poll for new messages.
+
+Also forwards manual brief-trigger and time-config commands to the
+in-process scheduler running in webhook/app.py.
 """
 import re
 import os
@@ -11,9 +13,11 @@ from core import telegram_client, trades, sheets
 from core.logger import log_event
 
 
-# State file - stores last processed update_id to avoid re-processing
 STATE_FILE = "/tmp/telegram_state.txt"
 PAUSE_FILE = "/tmp/bot_paused.txt"
+
+# Briefs the user can trigger via /run <name>
+VALID_BRIEFS = ("premarket", "midsession", "preclose", "eod")
 
 
 def process_commands() -> int:
@@ -33,7 +37,6 @@ def process_commands() -> int:
         max_id = max(max_id, update_id)
 
         msg = update.get("message", {})
-        # Only accept commands from the owner's chat
         chat_id = str(msg.get("chat", {}).get("id", ""))
         if chat_id != str(TELEGRAM_CHAT_ID):
             log_event("WARN", "commands", f"Ignored message from chat {chat_id}")
@@ -55,7 +58,7 @@ def process_commands() -> int:
 def _dispatch(text: str) -> str:
     """Route command to handler."""
     parts = text.split()
-    cmd = parts[0].lower().split("@")[0]  # strip @botname suffix
+    cmd = parts[0].lower().split("@")[0]
     args = parts[1:]
 
     try:
@@ -75,6 +78,14 @@ def _dispatch(text: str) -> str:
             return _cmd_pause()
         if cmd == "/resume":
             return _cmd_resume()
+        if cmd == "/run":
+            return _cmd_run(args)
+        if cmd == "/runlist":
+            return _cmd_runlist()
+        if cmd == "/times":
+            return _cmd_times()
+        if cmd == "/settime":
+            return _cmd_settime(args)
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -96,13 +107,25 @@ def _cmd_help() -> str:
 <b>Status</b>
 /pnl — current P&amp;L snapshot
 /status — bot health check
+/times — show brief schedule
+
+<b>Manual briefs</b>
+/runlist — show /run options
+<code>/run premarket</code>
+<code>/run midsession</code>
+<code>/run preclose</code>
+<code>/run eod</code>
+
+<b>Schedule</b>
+<code>/settime BRIEF HH:MM</code> — change brief time
+Example: <code>/settime preclose 22:45</code>
 
 <b>Control</b>
 /pause — silence scheduled briefs
 /resume — re-enable briefs
 /help — this menu
 
-<b>Examples</b>
+<b>Trade examples</b>
 <code>/buy SPWO 10 31.40</code>
 <code>/sell SPWO 5 31.80</code>""")
 
@@ -210,8 +233,144 @@ def _cmd_resume() -> str:
     return "▶️ <b>Briefs resumed</b>\nScheduled briefs re-enabled."
 
 
+# ---------------------------------------------------------------------------
+# Manual brief triggers and schedule management
+# ---------------------------------------------------------------------------
+
+def _cmd_runlist() -> str:
+    return ("<b>🚀 Manual brief triggers</b>\n"
+            "─────────────\n"
+            "<code>/run premarket</code> — full pre-market brief\n"
+            "<code>/run midsession</code> — mid-session check\n"
+            "<code>/run preclose</code> — pre-close verdict\n"
+            "<code>/run eod</code> — end-of-day summary\n\n"
+            "Briefs run synchronously — Telegram message arrives in 30–60 sec.")
+
+
+def _cmd_run(args: list) -> str:
+    if not args:
+        return _cmd_runlist()
+
+    brief = args[0].lower().strip()
+    if brief not in VALID_BRIEFS:
+        return (f"❌ Unknown brief: <code>{brief}</code>\n"
+                f"Send /runlist to see options.")
+
+    # Import lazily to avoid circular import at module load
+    try:
+        from webhook import app as webhook_app
+    except Exception as e:
+        return f"❌ Could not reach scheduler: {e}"
+
+    # Run synchronously inline. The bot already replies to Telegram once the
+    # brief itself sends. We acknowledge here so the user sees feedback fast.
+    telegram_client.send_message(
+        f"🚀 Running <b>{brief}</b> brief now…"
+    )
+    try:
+        webhook_app._execute_brief(brief, source="telegram")
+    except Exception as e:
+        return f"❌ Brief failed: {e}"
+    # The brief itself sends a Telegram message; no extra reply needed.
+    return ""
+
+
+def _cmd_times() -> str:
+    """Show currently active brief times (read from scheduler in-memory)."""
+    try:
+        from webhook import app as webhook_app
+        active = webhook_app._active_times or {}
+    except Exception:
+        active = {}
+
+    if not active:
+        # Fallback: read from sheet directly
+        from webhook.app import DEFAULT_TIMES, CONFIG_KEY_PREFIX
+        cfg = sheets.read_config() or {}
+        active = {}
+        for brief, default in DEFAULT_TIMES.items():
+            active[brief] = cfg.get(f"{CONFIG_KEY_PREFIX}{brief.upper()}", default)
+
+    lines = ["<b>🕒 Brief schedule (KSA, Mon–Fri)</b>",
+             "─────────────"]
+    label = {
+        "premarket":  "Pre-market   ",
+        "midsession": "Mid-session  ",
+        "preclose":   "Pre-close    ",
+        "eod":        "End of day   ",
+    }
+    for brief in ("premarket", "midsession", "preclose", "eod"):
+        lines.append(f"<code>{label[brief]} {active.get(brief, '?')}</code>")
+    lines.append("")
+    lines.append("Change with: <code>/settime BRIEF HH:MM</code>")
+    return "\n".join(lines)
+
+
+def _cmd_settime(args: list) -> str:
+    if len(args) < 2:
+        return ("Usage: <code>/settime BRIEF HH:MM</code>\n"
+                "Briefs: premarket, midsession, preclose, eod\n"
+                "Example: <code>/settime preclose 22:45</code>")
+
+    brief = args[0].lower().strip()
+    hhmm = args[1].strip()
+
+    if brief not in VALID_BRIEFS:
+        return (f"❌ Unknown brief: <code>{brief}</code>\n"
+                f"Valid: {', '.join(VALID_BRIEFS)}")
+
+    if not _validate_hhmm(hhmm):
+        return (f"❌ Invalid time: <code>{hhmm}</code>\n"
+                f"Use 24-hour HH:MM, e.g. 22:45 or 09:00")
+
+    # Persist to Config tab so it survives redeploys
+    from webhook.app import CONFIG_KEY_PREFIX
+    key = f"{CONFIG_KEY_PREFIX}{brief.upper()}"
+    try:
+        sheets.write_config(key, hhmm)
+    except Exception as e:
+        return f"❌ Could not save to Config tab: {e}"
+
+    # Live-rebuild the in-process scheduler so the change takes effect now
+    rebuild_ok = True
+    rebuild_err = ""
+    try:
+        from webhook import app as webhook_app
+        webhook_app.rebuild_schedule()
+        active = webhook_app._active_times.get(brief, hhmm)
+    except Exception as e:
+        rebuild_ok = False
+        rebuild_err = str(e)
+        log_event("WARN", "commands", f"Reschedule failed (saved anyway): {e}")
+        active = hhmm
+
+    if rebuild_ok:
+        return (f"✅ <b>Schedule updated</b>\n"
+                f"<code>{brief}</code> → <code>{active}</code> (KSA, Mon–Fri)\n\n"
+                f"Saved to Config tab.\n"
+                f"Send /times to see all.")
+    else:
+        return (f"⚠️ <b>Saved but not applied</b>\n"
+                f"<code>{brief}</code> → <code>{active}</code> "
+                f"saved to Config tab, but the live scheduler rejected it: "
+                f"<code>{rebuild_err}</code>\n\n"
+                f"Restart the Railway service or fix the value to apply.")
+
+
 def _is_paused() -> bool:
     return os.path.exists(PAUSE_FILE)
+
+
+def _validate_hhmm(s: str) -> bool:
+    """Return True if string is exactly HH:MM (zero-padded) with valid 24h time."""
+    try:
+        s = s.strip()
+        if len(s) != 5 or s[2] != ":":
+            return False
+        h, m = int(s[0:2]), int(s[3:5])
+        return 0 <= h < 24 and 0 <= m < 60
+    except (ValueError, AttributeError):
+        return False
 
 
 def _read_last_update_id() -> int:
