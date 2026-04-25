@@ -186,6 +186,7 @@ def write_config(setting: str, value: str) -> bool:
     except Exception as e:
         log_event("ERROR", "sheets", f"Write config failed: {e}")
         return False
+        
 # ============================================================
 # WRITERS
 # ============================================================
