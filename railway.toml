@@ -2,7 +2,13 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "gunicorn webhook.app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 30"
+# --timeout 120: gives the webhook handler ample time to finish even though
+# /run now spawns briefs to a background thread (was 30s, which killed
+# briefs mid-flight and caused Telegram to retry, spawning duplicate runs).
+# --workers 1 + --threads 4: one process keeps in-memory scheduler state
+# coherent; 4 threads handle concurrent webhooks while the spawn-thread
+# does the heavy work.
+startCommand = "gunicorn webhook.app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120"
 healthcheckPath = "/"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
