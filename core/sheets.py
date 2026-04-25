@@ -159,7 +159,33 @@ def read_config() -> dict:
         log_event("ERROR", "sheets", f"Read config failed: {e}")
         return {}
 
+def write_config(setting: str, value: str) -> bool:
+    """Update a setting in the Config tab. Adds a new row if not found.
 
+    Returns True on success, False on failure.
+    """
+    ss = _get_spreadsheet()
+    if ss is None:
+        return False
+    try:
+        ws = ss.worksheet("Config")
+        # Find the row by Setting (column A). Header is in row 1.
+        cell = None
+        try:
+            cell = ws.find(setting, in_column=1)
+        except Exception:
+            cell = None
+
+        if cell is not None:
+            # Update the Value column (column B)
+            ws.update_cell(cell.row, 2, str(value))
+        else:
+            # Append a new row: [Setting, Value, Description]
+            ws.append_row([setting, str(value), ""])
+        return True
+    except Exception as e:
+        log_event("ERROR", "sheets", f"Write config failed: {e}")
+        return False
 # ============================================================
 # WRITERS
 # ============================================================
