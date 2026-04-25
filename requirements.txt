@@ -10,5 +10,10 @@ google-auth>=2.30.0
 flask>=3.0.0
 gunicorn>=22.0.0
 
+# Scheduler (Railway in-process cron, replaces unreliable GitHub Actions schedule)
+schedule>=1.2.0,<2.0.0
+# pytz is required by schedule.at() when passing a tz argument
+pytz>=2024.1
+
 # Timezone
 tzdata>=2024.1
