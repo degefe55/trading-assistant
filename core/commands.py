@@ -2,8 +2,9 @@
 Command handler for Telegram bot interactions.
 Parses /buy /sell /pnl /status /pause /resume /help commands.
 
-Also forwards manual brief-trigger and time-config commands to the
-in-process scheduler running in webhook/app.py.
+/run dispatches to the in-process scheduler in webhook/app.py via
+_spawn_brief, which runs the brief in a background thread and returns
+immediately so the Telegram webhook doesn't time out.
 """
 import re
 import os
@@ -16,15 +17,10 @@ from core.logger import log_event
 STATE_FILE = "/tmp/telegram_state.txt"
 PAUSE_FILE = "/tmp/bot_paused.txt"
 
-# Briefs the user can trigger via /run <name>
 VALID_BRIEFS = ("premarket", "midsession", "preclose", "eod")
 
 
 def process_commands() -> int:
-    """
-    Poll Telegram for new messages, process commands.
-    Returns number of commands processed.
-    """
     last_id = _read_last_update_id()
     updates = telegram_client.get_updates(offset=last_id + 1)
     if not updates:
@@ -56,7 +52,6 @@ def process_commands() -> int:
 
 
 def _dispatch(text: str) -> str:
-    """Route command to handler."""
     parts = text.split()
     cmd = parts[0].lower().split("@")[0]
     args = parts[1:]
@@ -218,6 +213,17 @@ def _cmd_status() -> str:
     lines.append(f"Mock mode: {'ON' if os.getenv('MOCK_MODE', 'true') == 'true' else 'OFF'}")
     positions = sheets.read_positions()
     lines.append(f"Open positions: {len(positions)}")
+
+    # Show currently-running briefs if any
+    try:
+        from webhook import app as webhook_app
+        with webhook_app._running_lock:
+            running = sorted(webhook_app._currently_running)
+        if running:
+            lines.append(f"Running now: {', '.join(running)}")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
@@ -244,7 +250,9 @@ def _cmd_runlist() -> str:
             "<code>/run midsession</code> — mid-session check\n"
             "<code>/run preclose</code> — pre-close verdict\n"
             "<code>/run eod</code> — end-of-day summary\n\n"
-            "Briefs run synchronously — Telegram message arrives in 30–60 sec.")
+            "Brief runs in background; the brief Telegram message arrives "
+            "in 30–90 seconds. Sending /run again while one is running is "
+            "ignored (no duplicate runs / no token waste).")
 
 
 def _cmd_run(args: list) -> str:
@@ -256,27 +264,21 @@ def _cmd_run(args: list) -> str:
         return (f"❌ Unknown brief: <code>{brief}</code>\n"
                 f"Send /runlist to see options.")
 
-    # Import lazily to avoid circular import at module load
     try:
         from webhook import app as webhook_app
     except Exception as e:
         return f"❌ Could not reach scheduler: {e}"
 
-    # Run synchronously inline. The bot already replies to Telegram once the
-    # brief itself sends. We acknowledge here so the user sees feedback fast.
-    telegram_client.send_message(
-        f"🚀 Running <b>{brief}</b> brief now…"
-    )
-    try:
-        webhook_app._execute_brief(brief, source="telegram")
-    except Exception as e:
-        return f"❌ Brief failed: {e}"
-    # The brief itself sends a Telegram message; no extra reply needed.
-    return ""
+    spawned, reason = webhook_app._spawn_brief(brief, source="telegram")
+    if spawned:
+        return (f"🚀 Running <b>{brief}</b> brief in background…\n"
+                f"<i>Result will arrive in 30–90 seconds.</i>")
+    else:
+        return (f"⚠️ <b>{brief}</b> not started — {reason}.\n"
+                f"Send /status to see what's running.")
 
 
 def _cmd_times() -> str:
-    """Show currently active brief times (read from scheduler in-memory)."""
     try:
         from webhook import app as webhook_app
         active = webhook_app._active_times or {}
@@ -284,7 +286,6 @@ def _cmd_times() -> str:
         active = {}
 
     if not active:
-        # Fallback: read from sheet directly
         from webhook.app import DEFAULT_TIMES, CONFIG_KEY_PREFIX
         cfg = sheets.read_config() or {}
         active = {}
@@ -321,9 +322,8 @@ def _cmd_settime(args: list) -> str:
 
     if not _validate_hhmm(hhmm):
         return (f"❌ Invalid time: <code>{hhmm}</code>\n"
-                f"Use 24-hour HH:MM, e.g. 22:45 or 09:00")
+                f"Use 24-hour HH:MM (zero-padded), e.g. 22:45 or 09:00")
 
-    # Persist to Config tab so it survives redeploys
     from webhook.app import CONFIG_KEY_PREFIX
     key = f"{CONFIG_KEY_PREFIX}{brief.upper()}"
     try:
@@ -331,7 +331,6 @@ def _cmd_settime(args: list) -> str:
     except Exception as e:
         return f"❌ Could not save to Config tab: {e}"
 
-    # Live-rebuild the in-process scheduler so the change takes effect now
     rebuild_ok = True
     rebuild_err = ""
     try:
@@ -362,7 +361,6 @@ def _is_paused() -> bool:
 
 
 def _validate_hhmm(s: str) -> bool:
-    """Return True if string is exactly HH:MM (zero-padded) with valid 24h time."""
     try:
         s = s.strip()
         if len(s) != 5 or s[2] != ":":
