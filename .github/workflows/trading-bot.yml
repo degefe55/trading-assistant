@@ -1,13 +1,15 @@
 # ============================================================================
 # Trading Bot Workflow
-# Re-registered: 2026-04-24 (fixes GitHub schedule-not-registered bug)
-# If the Actions tab ever shows only "workflow_dispatch event trigger"
-# and no "schedule event", bump the date above and commit to re-register.
+#
+# Scheduling now lives in webhook/app.py running on Railway. GitHub Actions
+# scheduled crons were arriving 2+ hours late (queue contention), so the
+# `schedule:` block has been removed to prevent duplicate firings.
+#
+# This workflow remains for MANUAL runs only (workflow_dispatch).
 # ============================================================================
 name: Trading Bot
 
 on:
-  # Manual trigger for testing
   workflow_dispatch:
     inputs:
       brief_type:
@@ -31,20 +33,6 @@ on:
           - "true"
           - "false"
 
-  # Scheduled runs - each brief gets its own cron line.
-  # Brief type is derived from github.event.schedule (the exact cron string
-  # that triggered the run), so GitHub Actions cron delays (often 15-30+ min)
-  # DO NOT cause misclassification.
-  schedule:
-    # KSA 3:30 PM = UTC 12:30 - premarket brief
-    - cron: "30 12 * * 1-5"
-    # KSA 7:30 PM = UTC 16:30 - midsession check (only alerts if material change)
-    - cron: "30 16 * * 1-5"
-    # KSA 10:30 PM = UTC 19:30 - preclose verdict
-    - cron: "30 19 * * 1-5"
-    # KSA 11:00 PM = UTC 20:00 - end of day summary
-    - cron: "0 20 * * 1-5"
-
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -64,44 +52,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Determine brief type from triggering cron
-        id: brief
-        env:
-          TRIGGERING_CRON: ${{ github.event.schedule }}
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_BRIEF_TYPE: ${{ github.event.inputs.brief_type }}
-          INPUT_MOCK_MODE: ${{ github.event.inputs.mock_mode }}
-        run: |
-          set -euo pipefail
-          echo "Event: $EVENT_NAME"
-          echo "Triggering cron: '${TRIGGERING_CRON:-<none>}'"
-          if [ "$EVENT_NAME" = "schedule" ]; then
-            # Map the exact cron string to a brief type. This is immune to
-            # GitHub cron execution delays because we're matching the schedule
-            # entry that fired, not the current wall-clock time.
-            case "$TRIGGERING_CRON" in
-              "30 12 * * 1-5") BRIEF="premarket" ;;
-              "30 16 * * 1-5") BRIEF="midsession" ;;
-              "30 19 * * 1-5") BRIEF="preclose"  ;;
-              "0 20 * * 1-5")  BRIEF="eod"       ;;
-              *)
-                echo "::error::Unrecognized cron: '$TRIGGERING_CRON'. Update the case statement if you added a new cron."
-                exit 1
-                ;;
-            esac
-            echo "brief_type=$BRIEF" >> "$GITHUB_OUTPUT"
-            echo "mock_mode=false"   >> "$GITHUB_OUTPUT"
-            echo "Resolved brief_type=$BRIEF (from schedule)"
-          else
-            echo "brief_type=$INPUT_BRIEF_TYPE" >> "$GITHUB_OUTPUT"
-            echo "mock_mode=$INPUT_MOCK_MODE"   >> "$GITHUB_OUTPUT"
-            echo "Resolved brief_type=$INPUT_BRIEF_TYPE (manual)"
-          fi
-
       - name: Run trading bot
         env:
-          BRIEF_TYPE: ${{ steps.brief.outputs.brief_type }}
-          MOCK_MODE: ${{ steps.brief.outputs.mock_mode }}
+          BRIEF_TYPE: ${{ github.event.inputs.brief_type }}
+          MOCK_MODE: ${{ github.event.inputs.mock_mode }}
           DEBUG_MODE: "true"
           ACTIVE_MARKETS: "US"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
