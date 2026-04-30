@@ -77,10 +77,14 @@ def _dispatch(text: str) -> str:
             return _cmd_run(args)
         if cmd == "/runlist":
             return _cmd_runlist()
+        if cmd == "/cancel":
+            return _cmd_cancel(args)
         if cmd == "/times":
             return _cmd_times()
         if cmd == "/settime":
             return _cmd_settime(args)
+        if cmd == "/ask":
+            return _cmd_ask(args)
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -110,6 +114,13 @@ def _cmd_help() -> str:
 <code>/run midsession</code>
 <code>/run preclose</code>
 <code>/run eod</code>
+<code>/cancel BRIEF</code> — stop a running brief
+Example: <code>/cancel premarket</code>
+
+<b>Follow-up questions</b>
+<code>/ask RecID question</code>
+Example: <code>/ask 20260430-1530-PRE-SPWO why SELL?</code>
+Or: reply directly to any brief message and type your question.
 
 <b>Schedule</b>
 <code>/settime BRIEF HH:MM</code> — change brief time
@@ -252,7 +263,48 @@ def _cmd_runlist() -> str:
             "<code>/run eod</code> — end-of-day summary\n\n"
             "Brief runs in background; the brief Telegram message arrives "
             "in 30–90 seconds. Sending /run again while one is running is "
-            "ignored (no duplicate runs / no token waste).")
+            "ignored (no duplicate runs / no token waste).\n\n"
+            "To stop a running brief: <code>/cancel BRIEF</code>")
+
+
+def _cmd_cancel(args: list) -> str:
+    """Stop a running brief. Cooperative cancel: in-flight Sonnet call
+    finishes (we can't kill it from Python), but no further tickers are
+    analyzed. So damage is capped at one Claude call from the moment
+    /cancel is sent."""
+    if not args:
+        return ("Usage: <code>/cancel BRIEF</code>\n"
+                f"Briefs: {', '.join(VALID_BRIEFS)}\n"
+                "Example: <code>/cancel premarket</code>\n\n"
+                "Send /status to see what's running.")
+
+    brief = args[0].lower().strip()
+    if brief not in VALID_BRIEFS:
+        return (f"❌ Unknown brief: <code>{brief}</code>\n"
+                f"Valid: {', '.join(VALID_BRIEFS)}")
+
+    try:
+        from webhook import app as webhook_app
+        from core import analyst as analyst_mod
+    except Exception as e:
+        return f"❌ Could not reach scheduler: {e}"
+
+    with webhook_app._running_lock:
+        is_running = brief in webhook_app._currently_running
+
+    if not is_running:
+        return (f"ℹ️ <b>{brief}</b> is not currently running.\n"
+                f"Nothing to cancel.")
+
+    flag_was_new = analyst_mod.request_cancel(brief)
+    if flag_was_new:
+        return (f"🛑 <b>Cancellation requested for {brief}</b>\n"
+                f"In-flight Claude call (if any) will finish, then the "
+                f"brief stops. No more tickers will be analyzed.\n\n"
+                f"You'll get a partial Telegram message confirming.")
+    else:
+        return (f"⚠️ <b>{brief}</b> already has a pending cancellation.\n"
+                f"Waiting for the in-flight Claude call to finish.")
 
 
 def _cmd_run(args: list) -> str:
@@ -354,6 +406,44 @@ def _cmd_settime(args: list) -> str:
                 f"saved to Config tab, but the live scheduler rejected it: "
                 f"<code>{rebuild_err}</code>\n\n"
                 f"Restart the Railway service or fix the value to apply.")
+
+
+def _cmd_ask(args: list) -> str:
+    """/ask <RecID> <question>: ask a follow-up about an earlier recommendation.
+
+    The RecID is the first arg (no spaces inside, hyphens only).
+    Everything after that is the question.
+    """
+    if len(args) < 2:
+        return ("Usage: <code>/ask RecID your question here</code>\n"
+                "RecID format: <code>YYYYMMDD-HHMM-BRIEF-TICKER</code>\n"
+                "Example: <code>/ask 20260430-1530-PRE-SPWO why SELL?</code>\n\n"
+                "<i>Or just reply directly to any brief message in this chat.</i>")
+
+    rec_id = args[0].strip()
+    question = " ".join(args[1:]).strip()
+
+    # Quick sanity check on the RecID shape (don't require regex perfection,
+    # just catch obvious typos before paying for a Claude call)
+    if "-" not in rec_id or len(rec_id) < 10:
+        return (f"❌ That doesn't look like a RecID: <code>{rec_id}</code>\n"
+                f"Expected: <code>YYYYMMDD-HHMM-BRIEF-TICKER</code>")
+
+    # Lazy import — followup module pulls in claude_client which loads
+    # the API client; we don't want that on every dispatch
+    try:
+        from core import followup
+    except Exception as e:
+        return f"❌ Could not load follow-up module: {e}"
+
+    result = followup.answer_followup(rec_id, question)
+    if not result.get("ok"):
+        return f"❌ {result.get('error', 'Unknown error')}"
+
+    return (f"💬 <b>Re:</b> {result['ticker']} ({result['action']})\n"
+            f"─────────────\n"
+            f"{result['answer']}\n\n"
+            f"<i>💰 ${result['cost_usd']:.4f}</i>")
 
 
 def _is_paused() -> bool:
