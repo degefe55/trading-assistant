@@ -121,7 +121,10 @@ def run_premarket_brief():
                 focus_analyses.append(result)
 
         covered = held_tickers | {a["ticker"] for a in focus_analyses}
-        for ticker in us_cfg.DEFAULT_WATCHLIST:
+        # Watchlist comes from Config tab (user-customized via /watch /unwatch),
+        # falling back to the built-in default list for new users.
+        watchlist = sheets.read_watchlist(default=us_cfg.DEFAULT_WATCHLIST)
+        for ticker in watchlist:
             if ticker in covered:
                 continue
             watchlist_tickers_set.add(ticker)
@@ -166,13 +169,20 @@ def run_premarket_brief():
     if cancelled:
         message = ("🛑 <b>PARTIAL — brief was cancelled mid-run</b>\n"
                    "─────────────\n" + message)
-    msg_id = telegram_client.send_message(message)
+
+    # Build inline keyboard with one '📖 Deep dive' button per analyzed ticker.
+    # Includes scout finalists too so user can drill into those.
+    keyboard = brief_composer.build_brief_keyboard(
+        position_analyses + focus_analyses + watchlist_analyses + scout_results
+    )
+    msg_id = telegram_client.send_message(message, inline_keyboard=keyboard)
 
     # Record which RecIDs this Telegram message covers, so threaded
     # replies can find them. Failure is non-fatal — the brief was sent.
     try:
         rec_ids = [a.get("rec_id") for a in
-                   (position_analyses + focus_analyses + watchlist_analyses)
+                   (position_analyses + focus_analyses + watchlist_analyses
+                    + scout_results)
                    if a.get("rec_id")]
         if msg_id and rec_ids:
             sheets.record_message_recids(msg_id, "premarket", rec_ids)
@@ -266,7 +276,8 @@ def run_midsession_check(manual_trigger: bool = False):
         message = brief_composer.compose_midsession_check(
             material_changes, summary["total_cost_usd"])
         if message:
-            msg_id = telegram_client.send_message(message)
+            keyboard = brief_composer.build_brief_keyboard(material_changes)
+            msg_id = telegram_client.send_message(message, inline_keyboard=keyboard)
             try:
                 rec_ids = [a.get("rec_id") for a in material_changes
                            if a.get("rec_id")]
@@ -336,7 +347,8 @@ def run_preclose_verdict():
     if cancelled:
         message = ("🛑 <b>PARTIAL — cancelled mid-run</b>\n"
                    "─────────────\n" + message)
-    msg_id = telegram_client.send_message(message)
+    keyboard = brief_composer.build_brief_keyboard(analyses)
+    msg_id = telegram_client.send_message(message, inline_keyboard=keyboard)
 
     try:
         rec_ids = [a.get("rec_id") for a in analyses if a.get("rec_id")]
