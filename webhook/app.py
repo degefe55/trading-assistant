@@ -292,24 +292,137 @@ def _handle_threaded_reply(parent_message_id: int, question_text: str,
 
 
 def _handle_callback_query(cb: dict):
-    """Inline-button tap. Only scaffolded right now; the deep-dive
-    handler lands with Q2. Always acknowledge so the spinner stops."""
+    """Inline-button tap on a brief. Routes by callback_data prefix.
+
+    Currently supported:
+      deepdive:<RecID>  → fetch stored deep dive from Recommendations,
+                          render and send as a threaded reply.
+
+    Always acknowledges the tap (Telegram requires this so the user's
+    button stops spinning).
+    """
     cb_id = cb.get("id", "")
     data = cb.get("data", "")
+    msg = cb.get("message") or {}
+    parent_msg_id = msg.get("message_id")
+    cb_chat_id = str((msg.get("chat") or {}).get("id", ""))
+
     log_event("INFO", "webhook", f"Callback received: data={data}")
 
-    # Acknowledge so user's button stops spinning
-    telegram_client.answer_callback_query(
-        cb_id, text="Working on it…", show_alert=False
+    # Security: ignore button taps from any chat that isn't ours
+    if cb_chat_id and cb_chat_id != str(TELEGRAM_CHAT_ID):
+        telegram_client.answer_callback_query(cb_id, text="Not authorized")
+        return jsonify({"ok": True, "ignored": "wrong chat"}), 200
+
+    # Acknowledge fast — Telegram times out the spinner if we're slow
+    telegram_client.answer_callback_query(cb_id, text="Loading deep dive…")
+
+    # Route by prefix
+    if data.startswith("deepdive:"):
+        rec_id = data[len("deepdive:"):].strip()
+        return _send_deep_dive(rec_id, parent_msg_id)
+
+    # Unknown callback — be honest, don't pretend it worked
+    telegram_client.send_message(
+        f"⚠️ Unknown button action: <code>{data[:60]}</code>",
+        reply_to_message_id=parent_msg_id,
+    )
+    return jsonify({"ok": True, "unknown_callback": data[:30]}), 200
+
+
+def _send_deep_dive(rec_id: str, parent_msg_id):
+    """Fetch a stored recommendation and render its deep_dive section.
+
+    No new Claude call — the deep dive was generated when the brief ran;
+    we're just retrieving it from the Recommendations sheet. This is the
+    'simpler middle path' choice: instant tap response, $0 cost, but the
+    deep dive is as-of-brief-time (not refreshed with current price/news).
+    """
+    if not rec_id or "-" not in rec_id:
+        telegram_client.send_message(
+            f"⚠️ Bad RecID in button: <code>{rec_id[:60]}</code>",
+            reply_to_message_id=parent_msg_id,
+        )
+        return jsonify({"ok": False, "error": "bad rec_id"}), 200
+
+    rec = sheets.read_recommendation(rec_id)
+    if not rec:
+        telegram_client.send_message(
+            f"⚠️ Couldn't find <code>{rec_id}</code> in Recommendations.\n"
+            f"<i>Older briefs (before this deploy) don't have stored deep "
+            f"dives.</i>",
+            reply_to_message_id=parent_msg_id,
+        )
+        return jsonify({"ok": False, "error": "not found"}), 200
+
+    # Try to extract the structured deep_dive from RawJSON (preferred —
+    # has technical/news/macro/reasoning split). Fall back to flat
+    # Reasoning column if RawJSON is missing or unparsable.
+    import json
+    raw_json = rec.get("RawJSON", "") or ""
+    deep = {}
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+            deep = parsed.get("deep_dive", {}) or {}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            deep = {}
+
+    ticker = rec.get("Ticker", "?")
+    action = rec.get("Action", "?")
+    when = f"{rec.get('Date', '')} {rec.get('Time_KSA', '')}"
+
+    lines = [
+        f"📖 <b>Deep dive: {ticker}</b> ({action})",
+        f"<i>From {rec.get('BriefType', '?')} · {when} KSA</i>",
+        "─────────────",
+    ]
+
+    if deep.get("technical"):
+        lines.append(f"• <b>Chart:</b> {deep['technical']}")
+    if deep.get("news"):
+        lines.append(f"• <b>News:</b> {deep['news']}")
+    if deep.get("macro"):
+        lines.append(f"• <b>Macro:</b> {deep['macro']}")
+    if deep.get("reasoning"):
+        lines.append(f"• <b>Reasoning:</b> {deep['reasoning']}")
+    elif rec.get("Reasoning"):
+        # Fallback: use the flat Reasoning column
+        lines.append(f"• <b>Reasoning:</b> {rec['Reasoning']}")
+
+    sl = deep.get("stop_loss") or rec.get("StopLoss")
+    tgt = deep.get("target") or rec.get("Target")
+    if sl or tgt:
+        bits = []
+        if sl: bits.append(f"Stop {sl}")
+        if tgt: bits.append(f"Target {tgt}")
+        lines.append(f"• <b>Levels:</b> {' · '.join(bits)}")
+
+    warnings = deep.get("warnings") or []
+    if warnings:
+        lines.append(f"• <b>⚠️ Warnings:</b> {'; '.join(warnings)}")
+
+    one_line = rec.get("OneLinePlan", "")
+    if one_line:
+        lines.append("")
+        lines.append(f"<i>{one_line}</i>")
+
+    if len(lines) <= 3:
+        # If we have a row but no deep-dive content at all, say so honestly
+        lines.append("<i>No deep-dive content stored for this rec.</i>")
+
+    lines.append("")
+    lines.append(
+        f"<i>💡 Reply to this for follow-up · "
+        f"or <code>/ask {rec_id} ...</code></i>"
     )
 
-    # Q2 will dispatch on data here. For now, politely say not implemented.
     telegram_client.send_message(
-        f"⚙️ Inline buttons aren't fully wired up yet "
-        f"(received: <code>{data[:60]}</code>).\n"
-        f"Use <code>/ask RecID question</code> in the meantime."
+        "\n".join(lines),
+        reply_to_message_id=parent_msg_id,
     )
-    return jsonify({"ok": True, "callback_ack": True}), 200
+    log_event("INFO", "webhook", f"Sent deep dive for {rec_id}")
+    return jsonify({"ok": True, "rec_id": rec_id}), 200
 
 
 # ---------------------------------------------------------------------------
