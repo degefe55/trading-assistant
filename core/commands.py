@@ -85,6 +85,16 @@ def _dispatch(text: str) -> str:
             return _cmd_settime(args)
         if cmd == "/ask":
             return _cmd_ask(args)
+        if cmd == "/list":
+            return _cmd_list()
+        if cmd == "/watch":
+            return _cmd_watch(args)
+        if cmd == "/unwatch":
+            return _cmd_unwatch(args)
+        if cmd == "/focus":
+            return _cmd_focus(args)
+        if cmd == "/unfocus":
+            return _cmd_unfocus(args)
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -120,7 +130,14 @@ Example: <code>/cancel premarket</code>
 <b>Follow-up questions</b>
 <code>/ask RecID question</code>
 Example: <code>/ask 20260430-1530-PRE-SPWO why SELL?</code>
-Or: reply directly to any brief message and type your question.
+Or: tap a ticker button on a brief, or reply directly to a brief.
+
+<b>Watchlist &amp; focus</b>
+/list — show watchlist + focus
+<code>/watch TICKER</code> — add to watchlist
+<code>/unwatch TICKER</code> — remove from watchlist
+<code>/focus TICKER</code> — promote to focus (max 3)
+<code>/unfocus TICKER</code> — remove from focus
 
 <b>Schedule</b>
 <code>/settime BRIEF HH:MM</code> — change brief time
@@ -444,6 +461,112 @@ def _cmd_ask(args: list) -> str:
             f"─────────────\n"
             f"{result['answer']}\n\n"
             f"<i>💰 ${result['cost_usd']:.4f}</i>")
+
+
+# ---------------------------------------------------------------------------
+# Watchlist & Focus management
+# ---------------------------------------------------------------------------
+
+def _validate_ticker(t: str) -> bool:
+    """Basic ticker shape check. We don't hit the data API to verify
+    existence — let analysis fail loudly if the ticker is bogus."""
+    if not t:
+        return False
+    t = t.strip().upper()
+    if not (1 <= len(t) <= 6):
+        return False
+    return all(c.isalpha() or c in (".", "-") for c in t)
+
+
+def _default_watchlist() -> list:
+    """Lazy import of US default watchlist."""
+    try:
+        from markets.us import config as us_cfg
+        return list(us_cfg.DEFAULT_WATCHLIST)
+    except Exception:
+        return []
+
+
+def _cmd_list() -> str:
+    """Show current watchlist + focus."""
+    watch = sheets.read_watchlist(default=_default_watchlist())
+    focus_rows = sheets.read_focus()
+    focus = [r.get("Ticker", "") for r in focus_rows if r.get("Ticker")]
+
+    lines = ["<b>📋 Tracking</b>", "─────────────"]
+    if focus:
+        lines.append(f"<b>🎯 Focus ({len(focus)}/{sheets.FOCUS_LIMIT}):</b> "
+                     + " ".join(f"<code>{t}</code>" for t in focus))
+    else:
+        lines.append(f"<b>🎯 Focus:</b> <i>none</i>")
+    if watch:
+        lines.append(f"<b>👁 Watchlist:</b> "
+                     + " ".join(f"<code>{t}</code>" for t in watch))
+    else:
+        lines.append("<b>👁 Watchlist:</b> <i>empty</i>")
+    lines.append("")
+    lines.append("<i>Use /watch /unwatch /focus /unfocus to change.</i>")
+    return "\n".join(lines)
+
+
+def _cmd_watch(args: list) -> str:
+    if not args:
+        return ("Usage: <code>/watch TICKER</code>\n"
+                "Example: <code>/watch NVDA</code>")
+    ticker = args[0].strip().upper()
+    if not _validate_ticker(ticker):
+        return f"❌ <code>{ticker}</code> doesn't look like a valid ticker."
+    current = sheets.read_watchlist(default=_default_watchlist())
+    if ticker in current:
+        return f"ℹ️ <code>{ticker}</code> is already in your watchlist."
+    new_list = current + [ticker]
+    if not sheets.write_watchlist(new_list):
+        return "❌ Failed to save watchlist. Check the Logs tab."
+    return (f"✅ Added <code>{ticker}</code> to watchlist.\n"
+            f"<i>Now tracking {len(new_list)}: "
+            f"{', '.join(new_list)}</i>")
+
+
+def _cmd_unwatch(args: list) -> str:
+    if not args:
+        return "Usage: <code>/unwatch TICKER</code>"
+    ticker = args[0].strip().upper()
+    current = sheets.read_watchlist(default=_default_watchlist())
+    if ticker not in current:
+        return f"ℹ️ <code>{ticker}</code> isn't in your watchlist.\nSend /list to see what is."
+    new_list = [t for t in current if t != ticker]
+    if not sheets.write_watchlist(new_list):
+        return "❌ Failed to save watchlist."
+    return (f"✅ Removed <code>{ticker}</code> from watchlist.\n"
+            f"<i>Now tracking {len(new_list)}: "
+            f"{', '.join(new_list) if new_list else '(empty)'}</i>")
+
+
+def _cmd_focus(args: list) -> str:
+    if not args:
+        return ("Usage: <code>/focus TICKER</code>\n"
+                f"Max {sheets.FOCUS_LIMIT} focus tickers; oldest gets dropped.")
+    ticker = args[0].strip().upper()
+    if not _validate_ticker(ticker):
+        return f"❌ <code>{ticker}</code> doesn't look like a valid ticker."
+    result = sheets.add_focus(ticker, market="US")
+    if not result.get("ok"):
+        return f"❌ {result.get('error', 'Unknown error')}"
+    msg = f"✅ <code>{ticker}</code> added to focus."
+    if result.get("dropped"):
+        msg += (f"\n<i>Dropped <code>{result['dropped']}</code> "
+                f"(oldest, focus is capped at {sheets.FOCUS_LIMIT}).</i>")
+    return msg
+
+
+def _cmd_unfocus(args: list) -> str:
+    if not args:
+        return "Usage: <code>/unfocus TICKER</code>"
+    ticker = args[0].strip().upper()
+    result = sheets.remove_focus(ticker)
+    if not result.get("ok"):
+        return f"❌ {result.get('error', 'Unknown error')}"
+    return f"✅ <code>{ticker}</code> removed from focus."
 
 
 def _is_paused() -> bool:

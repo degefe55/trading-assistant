@@ -1,7 +1,12 @@
 """
 Brief composer v3 - layered output with scouting.
-Design: 3-second scan → 30-second read → 3-minute deep dive.
-Actions first. Details below. Silence is acceptable.
+Design: 3-second scan → 30-second read → tap for deep dive.
+
+As of the deep-dive-on-tap change: deep-dive blocks are no longer rendered
+into the message. The analyst still generates them (the model needs the
+working space to reason its way to the action), but the rendered text
+omits them. Tap "📖 Deep dive: TICKER" on the brief to see the stored
+deep dive instantly. Set INCLUDE_DEEP_DIVE_IN_BRIEFS=True to revert.
 """
 from datetime import datetime
 from config import KSA_TZ, USD_TO_SAR, MOCK_MODE, DRY_RUN
@@ -9,6 +14,35 @@ from config import KSA_TZ, USD_TO_SAR, MOCK_MODE, DRY_RUN
 
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━"
 SUBDIV = "─────────────"
+
+# Toggle for verbose briefs. Default False = clean briefs + tap-for-detail.
+# Flip True to restore old verbose format (deep dive inline, no buttons).
+INCLUDE_DEEP_DIVE_IN_BRIEFS = False
+
+# Hint shown in the message footer reminding the user about tap + reply
+TAP_HINT = "<i>📖 Tap a ticker below for deep dive · reply to this msg to ask</i>"
+
+
+def build_brief_keyboard(analyses: list) -> list:
+    """Inline keyboard for a brief: one '📖 Deep dive: TICKER' row per
+    analysis with a rec_id.
+
+    Returns list of rows (each row is a list of one button dict), or
+    None if no analyses had RecIDs.
+    """
+    rows = []
+    seen = set()
+    for a in analyses:
+        rec_id = a.get("rec_id")
+        ticker = a.get("ticker")
+        if not rec_id or not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        rows.append([{
+            "text": f"📖 Deep dive: {ticker}",
+            "callback_data": f"deepdive:{rec_id}",
+        }])
+    return rows or None
 
 
 def compose_premarket_brief(positions_analyses: list, watchlist_analyses: list,
@@ -78,27 +112,30 @@ def compose_premarket_brief(positions_analyses: list, watchlist_analyses: list,
             parts.append(_scout_line(a))
     parts.append("")
 
-    # DEEP DIVES
-    parts.append(DIVIDER)
-    parts.append(f"<b>🔍 DEEP DIVES</b>")
-    parts.append(f"<i>(scroll past if done reading)</i>")
-    parts.append(DIVIDER)
-    parts.append("")
-
-    for a in all_main:
-        parts.append(_deep_dive(a))
-        parts.append("")
-
-    if scout_analyses:
+    # DEEP DIVES (gated — see INCLUDE_DEEP_DIVE_IN_BRIEFS at top)
+    if INCLUDE_DEEP_DIVE_IN_BRIEFS and all_main:
         parts.append(DIVIDER)
-        parts.append(f"<b>🔭 SCOUTING DETAILS</b>")
+        parts.append(f"<b>🔍 DEEP DIVES</b>")
+        parts.append(f"<i>(scroll past if done reading)</i>")
         parts.append(DIVIDER)
         parts.append("")
-        for a in scout_analyses:
-            parts.append(_deep_dive(a, show_catalyst=True))
+
+        for a in all_main:
+            parts.append(_deep_dive(a))
             parts.append("")
 
+        if scout_analyses:
+            parts.append(DIVIDER)
+            parts.append(f"<b>🔭 SCOUTING DETAILS</b>")
+            parts.append(DIVIDER)
+            parts.append("")
+            for a in scout_analyses:
+                parts.append(_deep_dive(a, show_catalyst=True))
+                parts.append("")
+
     parts.append(DIVIDER)
+    if not INCLUDE_DEEP_DIVE_IN_BRIEFS and (all_main or scout_analyses):
+        parts.append(TAP_HINT)
     parts.append(f"<i>💰 Run cost: ${run_cost:.4f}</i>")
     return "\n".join(parts)
 
@@ -131,8 +168,12 @@ def compose_midsession_check(material_changes: list, run_cost: float) -> str:
         parts.append("")
 
     parts.append(DIVIDER)
-    for a in material_changes:
-        parts.append(_deep_dive(a))
+    if INCLUDE_DEEP_DIVE_IN_BRIEFS:
+        for a in material_changes:
+            parts.append(_deep_dive(a))
+            parts.append("")
+    elif material_changes:
+        parts.append(TAP_HINT)
         parts.append("")
 
     parts.append(f"<i>💰 ${run_cost:.4f}</i>")
@@ -166,11 +207,16 @@ def compose_preclose_verdict(positions_analyses: list, run_cost: float) -> str:
         parts.append(_plan_line(a))
     parts.append("")
 
-    parts.append(DIVIDER)
-    parts.append(f"<b>🔍 Reasoning</b>")
-    parts.append(DIVIDER)
-    for a in positions_analyses:
-        parts.append(_deep_dive(a))
+    if INCLUDE_DEEP_DIVE_IN_BRIEFS:
+        parts.append(DIVIDER)
+        parts.append(f"<b>🔍 Reasoning</b>")
+        parts.append(DIVIDER)
+        for a in positions_analyses:
+            parts.append(_deep_dive(a))
+            parts.append("")
+    else:
+        parts.append(DIVIDER)
+        parts.append(TAP_HINT)
         parts.append("")
 
     parts.append(f"<i>💰 ${run_cost:.4f}</i>")

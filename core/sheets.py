@@ -352,6 +352,98 @@ def write_config(setting: str, value: str) -> bool:
         return False
 
 
+# ----- Watchlist (stored in Config tab as comma-separated WATCHLIST) -----
+
+WATCHLIST_KEY = "WATCHLIST"
+
+
+def read_watchlist(default: list = None) -> list:
+    """Return the user's customized watchlist, or `default` if unset.
+
+    Stored in the Config tab as one row: Setting=WATCHLIST, Value=comma-
+    separated tickers. Empty/missing → default. Caller should pass
+    DEFAULT_WATCHLIST so bot keeps working before any /watch command.
+    """
+    cfg = read_config() or {}
+    raw = (cfg.get(WATCHLIST_KEY) or "").strip()
+    if not raw:
+        return list(default or [])
+    parts = [p.strip().upper() for p in raw.split(",") if p.strip()]
+    return parts
+
+
+def write_watchlist(tickers: list) -> bool:
+    """Persist the watchlist (list of tickers) to the Config tab."""
+    clean = [t.strip().upper() for t in tickers if t and t.strip()]
+    # Dedupe while preserving order
+    seen = set()
+    deduped = []
+    for t in clean:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+    return write_config(WATCHLIST_KEY, ",".join(deduped))
+
+
+# ----- Focus tab writers (max 3 entries, drops oldest) -----
+
+FOCUS_LIMIT = 3
+
+
+def add_focus(ticker: str, market: str = "US") -> dict:
+    """Add a ticker to Focus tab. If at FOCUS_LIMIT, drops the oldest.
+
+    Returns {"ok": bool, "added": str, "dropped": str|None, "error": str}
+    """
+    ss = _get_spreadsheet()
+    if ss is None:
+        return {"ok": False, "error": "Sheet not available"}
+    ticker = ticker.strip().upper()
+    try:
+        ws = ss.worksheet("Focus")
+        records = ws.get_all_records()
+        # Filter to same market for limit-counting purposes
+        same_market = [r for r in records if r.get("Market", "US") == market]
+        # Already there?
+        if any(r.get("Ticker", "").upper() == ticker for r in records):
+            return {"ok": False, "error": f"{ticker} is already in focus"}
+        dropped = None
+        if len(same_market) >= FOCUS_LIMIT:
+            # Find the OLDEST same-market entry (top of the list, after header)
+            target = same_market[0]
+            target_ticker = target.get("Ticker", "")
+            # Find its row in the actual sheet to delete
+            cell = ws.find(target_ticker, in_column=1)
+            if cell is not None:
+                ws.delete_rows(cell.row)
+                dropped = target_ticker
+        # Append the new entry
+        ws.append_row([ticker, market,
+                       datetime.now(KSA_TZ).strftime("%Y-%m-%d")])
+        return {"ok": True, "added": ticker, "dropped": dropped}
+    except Exception as e:
+        log_event("ERROR", "sheets", f"add_focus({ticker}) failed: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+def remove_focus(ticker: str) -> dict:
+    """Remove a ticker from Focus tab. Returns {"ok": bool, "removed": str}."""
+    ss = _get_spreadsheet()
+    if ss is None:
+        return {"ok": False, "error": "Sheet not available"}
+    ticker = ticker.strip().upper()
+    try:
+        ws = ss.worksheet("Focus")
+        cell = ws.find(ticker, in_column=1)
+        if cell is None:
+            return {"ok": False, "error": f"{ticker} is not in focus"}
+        ws.delete_rows(cell.row)
+        return {"ok": True, "removed": ticker}
+    except Exception as e:
+        log_event("ERROR", "sheets", f"remove_focus({ticker}) failed: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 def read_recommendation(rec_id: str) -> dict:
     """Look up a single recommendation by RecID. Returns dict or empty.
 
