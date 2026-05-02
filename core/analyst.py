@@ -28,9 +28,12 @@ class BriefCancelled(Exception):
 
 # Cancellation flag — set by /cancel command via webhook/app.py.
 # A simple module-level dict is enough because Railway runs one process.
+# "watcher" added in Phase D.5 so /cancel watcher (and HTTP
+# /cancel/watcher) can stop a mid-flight watcher tick between tickers.
 _cancel_flags = {
     "premarket": False, "midsession": False,
     "preclose": False, "eod": False,
+    "watcher": False,
 }
 
 

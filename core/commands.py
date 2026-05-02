@@ -17,7 +17,7 @@ from core.logger import log_event
 STATE_FILE = "/tmp/telegram_state.txt"
 PAUSE_FILE = "/tmp/bot_paused.txt"
 
-VALID_BRIEFS = ("premarket", "midsession", "preclose", "eod")
+VALID_BRIEFS = ("premarket", "midsession", "preclose", "eod", "watcher")
 
 
 def process_commands() -> int:
@@ -95,6 +95,8 @@ def _dispatch(text: str) -> str:
             return _cmd_focus(args)
         if cmd == "/unfocus":
             return _cmd_unfocus(args)
+        if cmd == "/watcher":
+            return _cmd_watcher(args)
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -142,6 +144,11 @@ Or: tap a ticker button on a brief, or reply directly to a brief.
 <b>Schedule</b>
 <code>/settime BRIEF HH:MM</code> — change brief time
 Example: <code>/settime preclose 22:45</code>
+
+<b>Watcher (always-on)</b>
+/watcher status — last ticks + today's alerts
+/watcher on — enable watcher
+/watcher off — disable watcher
 
 <b>Control</b>
 /pause — silence scheduled briefs
@@ -306,8 +313,15 @@ def _cmd_cancel(args: list) -> str:
     except Exception as e:
         return f"❌ Could not reach scheduler: {e}"
 
-    with webhook_app._running_lock:
-        is_running = brief in webhook_app._currently_running
+    # Watcher uses two _currently_running keys (watcher_price and
+    # watcher_news) but a single "watcher" cancel flag. Check both.
+    if brief == "watcher":
+        with webhook_app._running_lock:
+            is_running = ("watcher_price" in webhook_app._currently_running
+                          or "watcher_news" in webhook_app._currently_running)
+    else:
+        with webhook_app._running_lock:
+            is_running = brief in webhook_app._currently_running
 
     if not is_running:
         return (f"ℹ️ <b>{brief}</b> is not currently running.\n"
@@ -753,6 +767,107 @@ def _cmd_unfocus(args: list) -> str:
     if not result.get("ok"):
         return f"❌ {result.get('error', 'Unknown error')}"
     return f"✅ <code>{ticker}</code> removed from focus."
+
+
+# ---------------------------------------------------------------------------
+# Watcher (Phase D.5) — /watcher status|on|off
+# ---------------------------------------------------------------------------
+
+def _cmd_watcher(args: list) -> str:
+    if not args:
+        return ("Usage: <code>/watcher status|on|off</code>\n"
+                "  • <code>/watcher status</code> — show last ticks + "
+                "today's alert counts\n"
+                "  • <code>/watcher on</code>  — enable the watcher\n"
+                "  • <code>/watcher off</code> — disable the watcher")
+
+    sub = args[0].lower().strip()
+
+    if sub == "status":
+        return _cmd_watcher_status()
+    if sub == "on":
+        if not sheets.write_config("WATCHER_ENABLED", "true"):
+            return "❌ Could not save WATCHER_ENABLED=true to Config tab."
+        return ("✅ <b>Watcher enabled</b>\n"
+                "Will run on the next scheduled tick during US market "
+                "hours.")
+    if sub == "off":
+        if not sheets.write_config("WATCHER_ENABLED", "false"):
+            return "❌ Could not save WATCHER_ENABLED=false to Config tab."
+        return ("🔕 <b>Watcher disabled</b>\n"
+                "Scheduled ticks will skip silently. Re-enable with "
+                "<code>/watcher on</code>.")
+
+    return (f"❌ Unknown subcommand: <code>{sub}</code>\n"
+            "Use: <code>/watcher status|on|off</code>")
+
+
+def _cmd_watcher_status() -> str:
+    """Show the watcher's enabled state, last tick times, and today's
+    per-ticker alert counts from the WatcherCooldown tab."""
+    from config import (WATCHER_ENABLED as PY_WATCHER_ENABLED,
+                        WATCHER_DAILY_ALERT_CAP as PY_CAP,
+                        WATCHER_PRICE_INTERVAL_MIN as PY_PRICE,
+                        WATCHER_NEWS_INTERVAL_MIN as PY_NEWS,
+                        WATCHER_INCLUDE_WATCHLIST as PY_INC_WATCH)
+
+    cfg = sheets.read_config() or {}
+
+    def _read_bool(key, fallback):
+        raw = cfg.get(key)
+        if raw is None or str(raw).strip() == "":
+            return fallback
+        return str(raw).strip().lower() == "true"
+
+    def _read_int(key, fallback):
+        raw = cfg.get(key)
+        if raw is None or str(raw).strip() == "":
+            return fallback
+        try:
+            return int(str(raw).strip())
+        except (ValueError, TypeError):
+            return fallback
+
+    enabled = _read_bool("WATCHER_ENABLED", PY_WATCHER_ENABLED)
+    cap = _read_int("WATCHER_DAILY_ALERT_CAP", PY_CAP)
+    price_int = _read_int("WATCHER_PRICE_INTERVAL_MIN", PY_PRICE)
+    news_int = _read_int("WATCHER_NEWS_INTERVAL_MIN", PY_NEWS)
+    inc_watch = _read_bool("WATCHER_INCLUDE_WATCHLIST", PY_INC_WATCH)
+
+    # Pull live last-run timestamps from the webhook scheduler. If the
+    # webhook module hasn't been imported (e.g. running under main.py
+    # not gunicorn), gracefully say "—".
+    last_price = "—"
+    last_news = "—"
+    try:
+        from webhook import app as webhook_app
+        last_price = webhook_app._last_watcher_runs.get("price", "—") or "—"
+        last_news = webhook_app._last_watcher_runs.get("news", "—") or "—"
+    except Exception:
+        pass
+
+    today_str = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
+    counts = sheets.read_cooldowns_for_date(today_str)
+
+    lines = ["<b>🔔 WATCHER STATUS</b>", "─────────────"]
+    lines.append(f"State: {'✅ ENABLED' if enabled else '🔕 DISABLED'}")
+    lines.append(f"Daily cap per ticker: <code>{cap}</code>")
+    lines.append(f"Price tick: every <code>{price_int}</code> min")
+    lines.append(f"News tick:  every <code>{news_int}</code> min")
+    lines.append(f"Watchlist included: "
+                 f"<code>{'yes' if inc_watch else 'no'}</code>")
+    lines.append("")
+    lines.append(f"Last price tick: <code>{last_price}</code>")
+    lines.append(f"Last news tick:  <code>{last_news}</code>")
+    lines.append("")
+    lines.append("<b>Today's alerts</b>")
+    if counts:
+        for c in counts:
+            lines.append(f"  • <code>{c['Ticker']}</code>: "
+                         f"{c['AlertCount']}/{cap}")
+    else:
+        lines.append("  <i>No alerts sent today.</i>")
+    return "\n".join(lines)
 
 
 def _is_paused() -> bool:

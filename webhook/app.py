@@ -50,7 +50,8 @@ os.environ.setdefault("ACTIVE_MARKETS", "US")
 
 from core import commands, telegram_client, sheets
 from core.logger import log_event, get_log_buffer
-from config import TELEGRAM_CHAT_ID, KSA_TZ
+from config import (TELEGRAM_CHAT_ID, KSA_TZ,
+                    WATCHER_PRICE_INTERVAL_MIN, WATCHER_NEWS_INTERVAL_MIN)
 import main as bot_main
 
 
@@ -83,6 +84,14 @@ _brief_locks = {b: threading.Lock() for b in DEFAULT_TIMES.keys()}
 _currently_running = set()   # set of brief names currently executing
 _running_lock = threading.Lock()
 
+# Phase D.5 — watcher state. Single shared lock across price + news ticks
+# so they can't double-run; on collision the loser logs "tick skipped"
+# and exits (no queueing — this is the explicit design choice).
+_watcher_lock = threading.Lock()
+_last_watcher_runs = {}      # {"price"|"news": iso ksa of last completion}
+_last_watcher_started = {}   # {"price"|"news": iso ksa of last start}
+_active_watcher_intervals = {}  # {"price": min, "news": min}
+
 
 # ---------------------------------------------------------------------------
 # HTTP endpoints
@@ -111,6 +120,9 @@ def status():
         "last_started_ksa": _last_started,
         "last_completed_ksa": _last_runs,
         "currently_running": running,
+        "watcher_intervals_min": _active_watcher_intervals,
+        "watcher_last_started_ksa": _last_watcher_started,
+        "watcher_last_completed_ksa": _last_watcher_runs,
         "now_utc": datetime.utcnow().isoformat(),
         "now_ksa": datetime.now(KSA_TZ).isoformat(),
     })
@@ -137,6 +149,56 @@ def manual_run(brief_type: str):
     if spawned:
         return jsonify({"ok": True, "spawned": brief_type}), 202
     return jsonify({"ok": False, "error": reason, "brief": brief_type}), 409
+
+
+@app.route("/run/watcher_price", methods=["POST", "GET"])
+def manual_run_watcher_price():
+    return manual_run_watcher("price")
+
+
+@app.route("/run/watcher_news", methods=["POST", "GET"])
+def manual_run_watcher_news():
+    return manual_run_watcher("news")
+
+
+@app.route("/run/watcher/<mode>", methods=["POST", "GET"])
+def manual_run_watcher(mode: str):
+    """Manually fire one watcher tick. Same skip-if-busy semantics as
+    the scheduled job — if the lock is held, returns 409."""
+    if not RUN_TOKEN:
+        return jsonify({"ok": False, "error": "RUN_TOKEN not configured"}), 503
+    if not _check_token():
+        return jsonify({"ok": False, "error": "invalid token"}), 401
+    if mode not in ("price", "news"):
+        return jsonify({"ok": False, "error": f"unknown mode: {mode}"}), 400
+
+    spawned, reason = _spawn_watcher_tick(mode, source="http")
+    if spawned:
+        return jsonify({"ok": True, "spawned": f"watcher_{mode}"}), 202
+    return jsonify({"ok": False, "error": reason,
+                    "mode": mode}), 409
+
+
+@app.route("/cancel/watcher", methods=["POST", "GET"])
+def cancel_watcher_endpoint():
+    """Request cancellation of an in-flight watcher run. Cooperative:
+    in-flight Sonnet finishes; further tickers are skipped."""
+    if not RUN_TOKEN:
+        return jsonify({"ok": False, "error": "RUN_TOKEN not configured"}), 503
+    if not _check_token():
+        return jsonify({"ok": False, "error": "invalid token"}), 401
+
+    if _watcher_lock.acquire(blocking=False):
+        # Lock was free → nothing running
+        _watcher_lock.release()
+        return jsonify({"ok": False, "error": "not running"}), 409
+
+    from core import analyst as analyst_mod
+    flag_was_new = analyst_mod.request_cancel("watcher")
+    log_event("INFO", "watcher",
+              f"Cancellation requested for watcher via HTTP "
+              f"(new={flag_was_new})")
+    return jsonify({"ok": True, "was_already_pending": not flag_was_new}), 202
 
 
 @app.route("/reschedule", methods=["POST", "GET"])
@@ -548,6 +610,71 @@ def _scheduled_runner(brief_type: str):
     _spawn_brief(brief_type, source="schedule")
 
 
+# ---------------------------------------------------------------------------
+# Watcher tick scheduling
+# ---------------------------------------------------------------------------
+
+def _spawn_watcher_tick(mode: str, source: str) -> tuple:
+    """Try to acquire the shared watcher lock and run one tick in a
+    background thread. If the lock is already held, log "tick skipped"
+    and return False — DO NOT QUEUE.
+
+    Returns (spawned: bool, reason: str).
+    """
+    if mode not in ("price", "news"):
+        return False, f"unknown mode: {mode}"
+
+    if not _watcher_lock.acquire(blocking=False):
+        # The shared lock means a previous price OR news tick is still
+        # running. Per spec: skip this tick, log it, do not queue.
+        log_event("INFO", "watcher",
+                  f"watcher tick skipped (mode={mode}, source={source}): "
+                  f"lock held")
+        return False, "lock held"
+
+    with _running_lock:
+        _currently_running.add(f"watcher_{mode}")
+    _last_watcher_started[mode] = datetime.now(KSA_TZ).isoformat()
+
+    def _runner():
+        try:
+            from core import watcher
+            try:
+                watcher.run_watcher_check(mode)
+            except Exception as e:
+                err = f"watcher tick crashed (mode={mode}): {e}\n{traceback.format_exc()}"
+                log_event("ERROR", "watcher", err)
+                try:
+                    telegram_client.send_error_alert(err[:1500])
+                except Exception:
+                    pass
+            _last_watcher_runs[mode] = datetime.now(KSA_TZ).isoformat()
+        finally:
+            with _running_lock:
+                _currently_running.discard(f"watcher_{mode}")
+            _watcher_lock.release()
+            try:
+                buf = get_log_buffer()
+                if buf:
+                    sheets.append_logs(buf)
+            except Exception as e:
+                print(f"watcher log flush failed: {e}", file=sys.stderr)
+
+    t = threading.Thread(target=_runner, daemon=True,
+                         name=f"watcher-{mode}")
+    t.start()
+    return True, "spawned"
+
+
+def _scheduled_watcher_runner(mode: str):
+    """Cron entry point — gate at the boundary, then spawn."""
+    if not _is_weekday_ksa():
+        log_event("INFO", "watcher",
+                  f"watcher tick skipped (mode={mode}): weekend in KSA")
+        return
+    _spawn_watcher_tick(mode, source="schedule")
+
+
 def _self_ping():
     if not PUBLIC_URL:
         return
@@ -598,17 +725,70 @@ def _load_times_from_config() -> dict:
     return times
 
 
+def _load_watcher_intervals_from_config() -> dict:
+    """Read WATCHER_PRICE_INTERVAL_MIN and WATCHER_NEWS_INTERVAL_MIN from
+    the Config tab. Sheet wins; Python consts (from config.py) are the
+    fallback. Both values clamped to [1, 1440] to keep the scheduler sane.
+    """
+    intervals = {
+        "price": WATCHER_PRICE_INTERVAL_MIN,
+        "news": WATCHER_NEWS_INTERVAL_MIN,
+    }
+    try:
+        cfg = sheets.read_config() or {}
+        for mode, key in (("price", "WATCHER_PRICE_INTERVAL_MIN"),
+                          ("news", "WATCHER_NEWS_INTERVAL_MIN")):
+            raw = cfg.get(key)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                n = int(str(raw).strip())
+            except (ValueError, TypeError):
+                log_event("WARN", "watcher",
+                          f"{key} not int ({raw!r}); using {intervals[mode]}")
+                continue
+            if 1 <= n <= 1440:
+                intervals[mode] = n
+            else:
+                log_event("WARN", "watcher",
+                          f"{key}={n} out of range [1,1440]; "
+                          f"using {intervals[mode]}")
+    except Exception as e:
+        log_event("WARN", "watcher",
+                  f"Failed to read watcher intervals, using defaults: {e}")
+    return intervals
+
+
 def rebuild_schedule():
-    global _active_times
+    global _active_times, _active_watcher_intervals
     with _scheduler_lock:
         schedule.clear()
+        # Brief jobs (existing)
         times = _load_times_from_config()
         for brief, hhmm in times.items():
             schedule.every().day.at(hhmm, KSA_TZ_STR).do(
                 _scheduled_runner, brief
             ).tag(brief)
         _active_times = times
-        log_event("INFO", "scheduler", f"Rebuilt schedule: {times}")
+
+        # Watcher jobs (Phase D.5). Two scheduled jobs as the spec
+        # requires; both share _watcher_lock so they can never overlap
+        # — on collision the later one logs "tick skipped" and exits.
+        # The market-hours / pause / enabled gates live inside
+        # watcher.run_watcher_check, not here, so the schedule itself
+        # stays simple and the gating decisions are observable in Logs.
+        intervals = _load_watcher_intervals_from_config()
+        schedule.every(intervals["price"]).minutes.do(
+            _scheduled_watcher_runner, "price"
+        ).tag("watcher_price")
+        schedule.every(intervals["news"]).minutes.do(
+            _scheduled_watcher_runner, "news"
+        ).tag("watcher_news")
+        _active_watcher_intervals = intervals
+
+        log_event("INFO", "scheduler",
+                  f"Rebuilt schedule: briefs={times}, "
+                  f"watcher={intervals}")
 
 
 def start_scheduler():

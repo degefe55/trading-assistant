@@ -70,6 +70,9 @@ ACTIVE_PROMPTS = {
     # Phase D-ish additions:
     "followup": "v1_followup.txt",       # Haiku call answering /ask + threaded replies
     "deepdive": "v1_deepdive.txt",       # Sonnet call when user taps "Deep dive" button
+    # Phase D.5 — always-on watcher:
+    "watcher_filter": "v1_watcher_filter.txt",  # Haiku per-ticker materiality screen
+    "watcher_alert": "v1_watcher_alert.txt",    # Sonnet alert when Haiku flags material
 }
 
 # ============================================================
@@ -82,6 +85,21 @@ DEFAULT_RULES = {
     "earnings_buffer_days": 3,    # Warn if holding into earnings within X days
     "stop_loss_is_avg_cost": True,  # Your core rule
 }
+
+# ============================================================
+# PHASE D.5 — ALWAYS-ON WATCHER
+# ============================================================
+# Python defaults for the watcher. Live values come from the Config tab
+# in Google Sheets (keys: WATCHER_ENABLED, WATCHER_PRICE_INTERVAL_MIN,
+# WATCHER_NEWS_INTERVAL_MIN, WATCHER_INCLUDE_WATCHLIST,
+# WATCHER_DAILY_ALERT_CAP). Sheet wins; these are the fallback when the
+# row is missing or unparsable. Env-var-overrideable too, matching the
+# rest of this file's convention.
+WATCHER_ENABLED = os.getenv("WATCHER_ENABLED", "true").lower() == "true"
+WATCHER_PRICE_INTERVAL_MIN = int(os.getenv("WATCHER_PRICE_INTERVAL_MIN", "30"))
+WATCHER_NEWS_INTERVAL_MIN = int(os.getenv("WATCHER_NEWS_INTERVAL_MIN", "60"))
+WATCHER_INCLUDE_WATCHLIST = os.getenv("WATCHER_INCLUDE_WATCHLIST", "false").lower() == "true"
+WATCHER_DAILY_ALERT_CAP = int(os.getenv("WATCHER_DAILY_ALERT_CAP", "3"))
 
 # ============================================================
 # API KEYS (from GitHub Secrets at runtime)

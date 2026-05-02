@@ -72,6 +72,7 @@ SCHEMAS = {
                         "NewsCount", "TopNewsHeadline", "Reasoning",
                         "RawJSON"],
     "MessageMap": ["MessageID", "Date", "Time_KSA", "BriefType", "RecIDs"],
+    "WatcherCooldown": ["Ticker", "Date", "AlertCount"],
     "Config": ["Setting", "Value", "Description"],
 }
 
@@ -500,6 +501,96 @@ def record_message_recids(message_id: int, brief_type: str,
         log_event("WARN", "sheets",
                   f"record_message_recids({message_id}) failed: {e}")
         return False
+
+
+# ============================================================
+# WATCHER COOLDOWN (Phase D.5)
+# ============================================================
+# Per-ticker per-day alert counter. Increments only when a Telegram
+# alert is actually sent (not on every Haiku flag) so a noisy news day
+# can't lock the user out before any alert reaches them.
+#
+# Schema: Ticker | Date | AlertCount  (date format: YYYY-MM-DD KSA)
+#
+# Race notes: read_cooldown + bump_cooldown is read-modify-write, not
+# atomic. Acceptable here because (a) Railway runs single-process and
+# (b) the watcher's per-tick lock in webhook/app.py serializes ticks.
+
+def read_cooldown(ticker: str, date_str: str) -> int:
+    """Return AlertCount for (ticker, date_str). 0 if no row yet."""
+    ss = _get_spreadsheet()
+    if ss is None or not ticker or not date_str:
+        return 0
+    ticker_u = ticker.strip().upper()
+    try:
+        ws = ss.worksheet("WatcherCooldown")
+        records = ws.get_all_records()
+        for r in records:
+            row_ticker = str(r.get("Ticker", "")).strip().upper()
+            row_date = str(r.get("Date", "")).strip()
+            if row_ticker == ticker_u and row_date == date_str:
+                try:
+                    return int(r.get("AlertCount", 0) or 0)
+                except (ValueError, TypeError):
+                    return 0
+        return 0
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"read_cooldown({ticker},{date_str}) failed: {e}")
+        return 0
+
+
+def bump_cooldown(ticker: str, date_str: str) -> int:
+    """Increment AlertCount for (ticker, date_str). Insert if missing.
+    Returns the new count, or 0 if write failed."""
+    ss = _get_spreadsheet()
+    if ss is None or not ticker or not date_str:
+        return 0
+    ticker_u = ticker.strip().upper()
+    try:
+        ws = ss.worksheet("WatcherCooldown")
+        records = ws.get_all_records()
+        # Row 1 is header; get_all_records starts at row 2.
+        for idx, r in enumerate(records, start=2):
+            row_ticker = str(r.get("Ticker", "")).strip().upper()
+            row_date = str(r.get("Date", "")).strip()
+            if row_ticker == ticker_u and row_date == date_str:
+                try:
+                    cur = int(r.get("AlertCount", 0) or 0)
+                except (ValueError, TypeError):
+                    cur = 0
+                new_count = cur + 1
+                ws.update_cell(idx, 3, new_count)
+                return new_count
+        ws.append_row([ticker_u, date_str, 1])
+        return 1
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"bump_cooldown({ticker},{date_str}) failed: {e}")
+        return 0
+
+
+def read_cooldowns_for_date(date_str: str) -> list:
+    """Return list of {Ticker, AlertCount} dicts for a given date.
+    Used by /watcher status to show today's per-ticker counts."""
+    ss = _get_spreadsheet()
+    if ss is None or not date_str:
+        return []
+    try:
+        ws = ss.worksheet("WatcherCooldown")
+        records = ws.get_all_records()
+        out = []
+        for r in records:
+            if str(r.get("Date", "")).strip() == date_str:
+                out.append({
+                    "Ticker": str(r.get("Ticker", "")).strip().upper(),
+                    "AlertCount": int(r.get("AlertCount", 0) or 0),
+                })
+        return out
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"read_cooldowns_for_date({date_str}) failed: {e}")
+        return []
 
 
 def get_recids_for_message(message_id: int) -> list:
