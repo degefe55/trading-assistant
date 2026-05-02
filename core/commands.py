@@ -491,8 +491,11 @@ def _verify_ticker_exists(ticker: str) -> dict:
     """Hit Twelve Data's /quote endpoint to confirm the ticker is real.
 
     Returns:
-        {"ok": True}                       if the ticker resolves to data
-        {"ok": False, "error": "..."}      if it doesn't or the API call fails
+        {"ok": True, "name": "...", "type": "...", "exchange": "..."}
+                                           if the ticker resolves to data
+        {"ok": False, "error": "..."}      if it doesn't
+        {"ok": True, "warning": "..."}     if the API itself is down
+                                           (graceful degradation)
 
     Costs one Twelve Data API call (free tier allows 800/day, plenty).
     """
@@ -526,12 +529,79 @@ def _verify_ticker_exists(ticker: str) -> dict:
         # A real ticker has a "close" or "price" field
         if not (data.get("close") or data.get("price") or data.get("symbol")):
             return {"ok": False, "error": "no price data returned"}
-        return {"ok": True}
+        # Extract metadata for display: company name, instrument type
+        # (Common Stock, ETF, etc.), and exchange. All optional — older API
+        # responses may not include all of them; fall back to empty strings.
+        return {
+            "ok": True,
+            "name": (data.get("name") or "").strip(),
+            "type": (data.get("type") or "").strip(),
+            "exchange": (data.get("exchange") or "").strip(),
+        }
     except Exception as e:
         # If the API itself is down, don't block the user — accept with warning
         log_event("WARN", "commands",
                   f"Ticker existence check errored: {e}")
         return {"ok": True, "warning": str(e)}
+
+
+def _format_ticker_summary(check: dict) -> str:
+    """Build a 'this is what you added' line from a successful verify result.
+
+    Examples of output:
+      "NVIDIA Corporation · Common Stock · NASDAQ"
+      "GraniteShares 2x Short NVDA Daily ETF · ETF · NASDAQ"
+      ""    (if we have no info — render nothing)
+
+    Used by /watch and /focus to confirm what the user actually added,
+    so typos like NVD-when-you-meant-NVDA surface immediately.
+    """
+    if not check.get("ok"):
+        return ""
+    parts = []
+    name = check.get("name", "")
+    typ = check.get("type", "")
+    exch = check.get("exchange", "")
+    if name:
+        parts.append(name)
+    if typ:
+        parts.append(typ)
+    if exch:
+        parts.append(exch)
+    return " · ".join(parts)
+
+
+def _is_unusual_instrument(check: dict) -> str:
+    """If the ticker is a leveraged/inverse ETF or other instrument that
+    might genuinely surprise the user, return a short warning string.
+    Empty if normal.
+
+    Plain ETFs like SPY, IBIT, SPWO are NOT flagged here — the name is
+    already shown, and the user can read "ETF" in the summary line.
+    Only flag instruments where typo-or-confusion is a real risk:
+      - Leveraged or inverse ETFs (moves don't match the underlying)
+      - Bond/mutual/closed-end funds (different liquidity, different risk)
+    """
+    if not check.get("ok"):
+        return ""
+    name = (check.get("name") or "").lower()
+    typ = (check.get("type") or "").lower()
+
+    # Leveraged or inverse ETFs — keywords that almost always mean this
+    # is a derivative product, not a plain stock or index ETF
+    leveraged_markers = ("2x ", "3x ", " 2x", " 3x", "leveraged",
+                         "inverse", " short ", " bull ",
+                         " bear ", "ultrapro", "ultrashort")
+    for marker in leveraged_markers:
+        if marker in f" {name} ":  # padded so word-boundary checks work
+            return "leveraged or inverse ETF — moves opposite or amplified vs. underlying"
+
+    # Bond / mutual funds — flag because liquidity and behavior differ
+    if typ in ("mutual fund", "bond fund", "closed-end fund"):
+        return f"this is a {check.get('type', 'fund')}, not a stock"
+
+    # Plain ETFs are fine — no warning. Name in summary is enough.
+    return ""
 
 
 def _validate_ticker(t: str) -> bool:
@@ -585,20 +655,39 @@ def _cmd_watch(args: list) -> str:
     if not check.get("ok"):
         return (f"❌ <code>{ticker}</code> isn't a recognized ticker.\n"
                 f"<i>{check.get('error', 'verification failed')}</i>")
-    warning = check.get("warning")  # e.g. API was down, accepted unverified
 
     current = sheets.read_watchlist(default=_default_watchlist())
     if ticker in current:
-        return f"ℹ️ <code>{ticker}</code> is already in your watchlist."
+        # Even if already there, surface the name so user can verify
+        # it's what they expected.
+        summary = _format_ticker_summary(check)
+        suffix = f"\n<i>{summary}</i>" if summary else ""
+        return f"ℹ️ <code>{ticker}</code> is already in your watchlist.{suffix}"
+
     new_list = current + [ticker]
     if not sheets.write_watchlist(new_list):
         return "❌ Failed to save watchlist. Check the Logs tab."
-    note = ""
+
+    # Build the response: confirmation + name/type/exchange + any warning
+    lines = [f"✅ Added <code>{ticker}</code> to watchlist."]
+
+    summary = _format_ticker_summary(check)
+    if summary:
+        lines.append(f"<i>{summary}</i>")
+
+    unusual = _is_unusual_instrument(check)
+    if unusual:
+        lines.append(f"⚠️ <i>{unusual}.</i>")
+        lines.append(f"<i>If you meant something else, /unwatch {ticker} "
+                     f"and try a different symbol.</i>")
+
+    warning = check.get("warning")
     if warning:
-        note = f"\n<i>⚠️ Couldn't verify ticker existence ({warning}); accepted anyway.</i>"
-    return (f"✅ Added <code>{ticker}</code> to watchlist.{note}\n"
-            f"<i>Now tracking {len(new_list)}: "
-            f"{', '.join(new_list)}</i>")
+        lines.append(f"<i>⚠️ Couldn't verify ticker details ({warning}); "
+                     f"accepted anyway.</i>")
+
+    lines.append(f"<i>Now tracking {len(new_list)}: {', '.join(new_list)}</i>")
+    return "\n".join(lines)
 
 
 def _cmd_unwatch(args: list) -> str:
@@ -632,13 +721,28 @@ def _cmd_focus(args: list) -> str:
     result = sheets.add_focus(ticker, market="US")
     if not result.get("ok"):
         return f"❌ {result.get('error', 'Unknown error')}"
-    msg = f"✅ <code>{ticker}</code> added to focus."
+
+    lines = [f"✅ <code>{ticker}</code> added to focus."]
+
+    summary = _format_ticker_summary(check)
+    if summary:
+        lines.append(f"<i>{summary}</i>")
+
+    unusual = _is_unusual_instrument(check)
+    if unusual:
+        lines.append(f"⚠️ <i>{unusual}.</i>")
+        lines.append(f"<i>If you meant something else, /unfocus {ticker} "
+                     f"and try a different symbol.</i>")
+
     if result.get("dropped"):
-        msg += (f"\n<i>Dropped <code>{result['dropped']}</code> "
-                f"(oldest, focus is capped at {sheets.FOCUS_LIMIT}).</i>")
+        lines.append(f"<i>Dropped <code>{result['dropped']}</code> "
+                     f"(oldest, focus is capped at {sheets.FOCUS_LIMIT}).</i>")
+
     if check.get("warning"):
-        msg += f"\n<i>⚠️ Ticker not verified ({check['warning']}); accepted anyway.</i>"
-    return msg
+        lines.append(f"<i>⚠️ Couldn't verify ticker details ({check['warning']}); "
+                     f"accepted anyway.</i>")
+
+    return "\n".join(lines)
 
 
 def _cmd_unfocus(args: list) -> str:
