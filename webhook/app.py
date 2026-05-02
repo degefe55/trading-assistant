@@ -227,7 +227,9 @@ def telegram_webhook():
         reply_to = msg.get("reply_to_message")
         if reply_to:
             parent_id = reply_to.get("message_id")
-            return _handle_threaded_reply(parent_id, text, msg.get("message_id"))
+            return _handle_threaded_reply(parent_id, text,
+                                          msg.get("message_id"),
+                                          chat_id=chat_id)
 
         # Otherwise: free-text not in reply context, ignore
         return jsonify({"ok": True, "ignored": "non-command, non-reply"}), 200
@@ -242,7 +244,7 @@ def telegram_webhook():
 
 
 def _handle_threaded_reply(parent_message_id: int, question_text: str,
-                           reply_message_id: int):
+                           reply_message_id: int, chat_id: str = None):
     """User replied to one of our brief messages with a question.
     Look up the parent's RecIDs and dispatch to followup."""
     if not parent_message_id:
@@ -267,7 +269,8 @@ def _handle_threaded_reply(parent_message_id: int, question_text: str,
               f"Threaded reply to msg {parent_message_id} -> rec {rec_id}")
 
     from core import followup
-    result = followup.answer_followup(rec_id, question_text)
+    result = followup.answer_followup(rec_id, question_text,
+                                       chat_id=chat_id or str(TELEGRAM_CHAT_ID))
     if not result.get("ok"):
         telegram_client.send_message(
             f"❌ {result.get('error', 'Unknown error')}",
