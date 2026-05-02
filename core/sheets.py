@@ -476,6 +476,10 @@ def record_message_recids(message_id: int, brief_type: str,
     Used so that when the user replies to a brief, we can look up the
     parent message and find which recommendations to give Claude as
     context for the follow-up question.
+
+    Note on type-handling: Google Sheets auto-numericizes string values
+    that look like numbers, so even if we write str(message_id) it gets
+    stored as a number. The lookup function compensates by trying both.
     """
     ss = _get_spreadsheet()
     if ss is None or not message_id:
@@ -483,7 +487,6 @@ def record_message_recids(message_id: int, brief_type: str,
     try:
         ws = ss.worksheet("MessageMap")
         when = datetime.now(KSA_TZ)
-        # Comma-separated list of rec_ids in one cell (Sheets-friendly)
         rec_id_str = ",".join(r for r in rec_ids if r)
         ws.append_row([
             str(message_id),
@@ -500,16 +503,46 @@ def record_message_recids(message_id: int, brief_type: str,
 
 
 def get_recids_for_message(message_id: int) -> list:
-    """Look up RecIDs covered by a given message_id. Returns list of strs."""
+    """Look up RecIDs covered by a given message_id. Returns list of strs.
+
+    gspread's `find()` matches by exact value type, but Google Sheets
+    silently numericizes integer-shaped strings — so a message_id stored
+    via append_row() as "12345" comes back as 12345 (int). We try both
+    forms, and fall back to scanning the column manually if both fail.
+    """
     ss = _get_spreadsheet()
     if ss is None or not message_id:
         return []
     try:
         ws = ss.worksheet("MessageMap")
-        cell = ws.find(str(message_id), in_column=1)
+        # Try string form first, then numeric, before giving up.
+        cell = None
+        try:
+            cell = ws.find(str(message_id), in_column=1)
+        except Exception:
+            cell = None
         if cell is None:
+            try:
+                cell = ws.find(int(message_id), in_column=1)
+            except Exception:
+                cell = None
+        if cell is None:
+            # Last-ditch: scan column 1 manually. Protects against
+            # gspread quirks across versions and against Sheets storing
+            # values in unexpected types.
+            target_str = str(message_id)
+            try:
+                col = ws.col_values(1) or []
+            except Exception:
+                col = []
+            for idx, val in enumerate(col, start=1):
+                if str(val).strip() == target_str:
+                    rec_id_str = ws.cell(idx, 5).value or ""
+                    return [r.strip() for r in rec_id_str.split(",")
+                            if r.strip()]
+            log_event("INFO", "sheets",
+                      f"get_recids_for_message: no match for {message_id}")
             return []
-        # RecIDs is column 5 (1-indexed)
         rec_id_str = ws.cell(cell.row, 5).value or ""
         return [r.strip() for r in rec_id_str.split(",") if r.strip()]
     except Exception as e:
