@@ -453,7 +453,11 @@ def _cmd_ask(args: list) -> str:
     except Exception as e:
         return f"❌ Could not load follow-up module: {e}"
 
-    result = followup.answer_followup(rec_id, question)
+    # Pass chat_id for rate-limit tracking (single-user, but the limit
+    # provides cost-burn protection regardless)
+    result = followup.answer_followup(
+        rec_id, question, chat_id=str(TELEGRAM_CHAT_ID)
+    )
     if not result.get("ok"):
         return f"❌ {result.get('error', 'Unknown error')}"
 
@@ -467,15 +471,73 @@ def _cmd_ask(args: list) -> str:
 # Watchlist & Focus management
 # ---------------------------------------------------------------------------
 
-def _validate_ticker(t: str) -> bool:
-    """Basic ticker shape check. We don't hit the data API to verify
-    existence — let analysis fail loudly if the ticker is bogus."""
+def _validate_ticker_format(t: str) -> bool:
+    """Cheap check for obviously-invalid input. Doesn't verify existence —
+    that's what _verify_ticker_exists() does, but it costs an API call so
+    we filter obvious garbage first."""
     if not t:
         return False
     t = t.strip().upper()
     if not (1 <= len(t) <= 6):
         return False
+    # Tickers are uppercase letters, plus rare dot for class shares (BRK.B)
+    # or hyphen for some preferreds. NO digits, NO mixed case input letters,
+    # NO multi-word strings. "GHETTO" passes len/alpha but fails the
+    # all-caps existence check below; this is just the cheap pre-filter.
     return all(c.isalpha() or c in (".", "-") for c in t)
+
+
+def _verify_ticker_exists(ticker: str) -> dict:
+    """Hit Twelve Data's /quote endpoint to confirm the ticker is real.
+
+    Returns:
+        {"ok": True}                       if the ticker resolves to data
+        {"ok": False, "error": "..."}      if it doesn't or the API call fails
+
+    Costs one Twelve Data API call (free tier allows 800/day, plenty).
+    """
+    try:
+        from config import TWELVE_DATA_KEY
+        if not TWELVE_DATA_KEY:
+            # No API key configured — fall through to format-only check.
+            log_event("WARN", "commands",
+                      "Twelve Data key missing; ticker existence not verified")
+            return {"ok": True, "warning": "not_verified"}
+
+        import requests
+        r = requests.get(
+            "https://api.twelvedata.com/quote",
+            params={"symbol": ticker, "apikey": TWELVE_DATA_KEY},
+            timeout=8,
+        )
+        if not r.ok:
+            # Twelve Data itself is broken — don't block the user. Accept
+            # with a warning so we degrade gracefully (same pattern as
+            # FRED outages elsewhere in the bot).
+            log_event("WARN", "commands",
+                      f"Ticker check API returned {r.status_code}; "
+                      f"accepting {ticker} unverified")
+            return {"ok": True, "warning": f"price API down ({r.status_code})"}
+        data = r.json()
+        # Twelve Data returns {"code": 400/404, "message": "..."} for bad tickers
+        if isinstance(data, dict) and data.get("code") and data.get("code") != 200:
+            msg = data.get("message", f"code {data.get('code')}")
+            return {"ok": False, "error": msg}
+        # A real ticker has a "close" or "price" field
+        if not (data.get("close") or data.get("price") or data.get("symbol")):
+            return {"ok": False, "error": "no price data returned"}
+        return {"ok": True}
+    except Exception as e:
+        # If the API itself is down, don't block the user — accept with warning
+        log_event("WARN", "commands",
+                  f"Ticker existence check errored: {e}")
+        return {"ok": True, "warning": str(e)}
+
+
+def _validate_ticker(t: str) -> bool:
+    """Legacy alias kept for any internal callers; format-only check.
+    Use _verify_ticker_exists() in /watch and /focus for real validation."""
+    return _validate_ticker_format(t)
 
 
 def _default_watchlist() -> list:
@@ -514,15 +576,27 @@ def _cmd_watch(args: list) -> str:
         return ("Usage: <code>/watch TICKER</code>\n"
                 "Example: <code>/watch NVDA</code>")
     ticker = args[0].strip().upper()
-    if not _validate_ticker(ticker):
+    if not _validate_ticker_format(ticker):
         return f"❌ <code>{ticker}</code> doesn't look like a valid ticker."
+
+    # Verify the ticker actually exists before adding (one Twelve Data
+    # call, ~free). Stops "/watch ghetto" succeeding silently.
+    check = _verify_ticker_exists(ticker)
+    if not check.get("ok"):
+        return (f"❌ <code>{ticker}</code> isn't a recognized ticker.\n"
+                f"<i>{check.get('error', 'verification failed')}</i>")
+    warning = check.get("warning")  # e.g. API was down, accepted unverified
+
     current = sheets.read_watchlist(default=_default_watchlist())
     if ticker in current:
         return f"ℹ️ <code>{ticker}</code> is already in your watchlist."
     new_list = current + [ticker]
     if not sheets.write_watchlist(new_list):
         return "❌ Failed to save watchlist. Check the Logs tab."
-    return (f"✅ Added <code>{ticker}</code> to watchlist.\n"
+    note = ""
+    if warning:
+        note = f"\n<i>⚠️ Couldn't verify ticker existence ({warning}); accepted anyway.</i>"
+    return (f"✅ Added <code>{ticker}</code> to watchlist.{note}\n"
             f"<i>Now tracking {len(new_list)}: "
             f"{', '.join(new_list)}</i>")
 
@@ -547,8 +621,14 @@ def _cmd_focus(args: list) -> str:
         return ("Usage: <code>/focus TICKER</code>\n"
                 f"Max {sheets.FOCUS_LIMIT} focus tickers; oldest gets dropped.")
     ticker = args[0].strip().upper()
-    if not _validate_ticker(ticker):
+    if not _validate_ticker_format(ticker):
         return f"❌ <code>{ticker}</code> doesn't look like a valid ticker."
+
+    check = _verify_ticker_exists(ticker)
+    if not check.get("ok"):
+        return (f"❌ <code>{ticker}</code> isn't a recognized ticker.\n"
+                f"<i>{check.get('error', 'verification failed')}</i>")
+
     result = sheets.add_focus(ticker, market="US")
     if not result.get("ok"):
         return f"❌ {result.get('error', 'Unknown error')}"
@@ -556,6 +636,8 @@ def _cmd_focus(args: list) -> str:
     if result.get("dropped"):
         msg += (f"\n<i>Dropped <code>{result['dropped']}</code> "
                 f"(oldest, focus is capped at {sheets.FOCUS_LIMIT}).</i>")
+    if check.get("warning"):
+        msg += f"\n<i>⚠️ Ticker not verified ({check['warning']}); accepted anyway.</i>"
     return msg
 
 
