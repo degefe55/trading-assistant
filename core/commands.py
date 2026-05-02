@@ -9,7 +9,7 @@ immediately so the Telegram webhook doesn't time out.
 import re
 import os
 from datetime import datetime
-from config import KSA_TZ, TELEGRAM_CHAT_ID
+from config import KSA_TZ, TELEGRAM_CHAT_ID, ACTIVE_MARKETS
 from core import telegram_client, trades, sheets
 from core.logger import log_event
 
@@ -17,7 +17,44 @@ from core.logger import log_event
 STATE_FILE = "/tmp/telegram_state.txt"
 PAUSE_FILE = "/tmp/bot_paused.txt"
 
-VALID_BRIEFS = ("premarket", "midsession", "preclose", "eod", "watcher")
+# Internal (Python) brief names use underscores. User-facing CLI uses
+# hyphens for SA briefs — converted at the dispatcher boundary via
+# _normalize_brief_arg(). The watcher entry covers both US and SA
+# watcher cancellation (single cancel flag per market handled in the
+# branching below).
+VALID_BRIEFS = (
+    "premarket", "midsession", "preclose", "eod",
+    "premarket_sa", "midsession_sa", "preclose_sa", "eod_sa",
+    "watcher", "watcher_sa",
+)
+
+
+def _normalize_brief_arg(s: str) -> str:
+    """Convert user-facing form (hyphens) to internal form (underscores).
+    e.g. 'premarket-sa' -> 'premarket_sa'. Lowercased + stripped."""
+    return (s or "").lower().strip().replace("-", "_")
+
+
+def _detect_market(ticker: str) -> str | None:
+    """Detect market from ticker shape.
+      - all-digit (1-4 chars)            → 'SA'  (Tadawul codes)
+      - all-letters or letters+./- (1-6) → 'US'  (NYSE/Nasdaq tickers)
+      - anything else                    → None  (ambiguous; ask user)
+    """
+    if not ticker:
+        return None
+    t = ticker.strip().upper()
+    if not t:
+        return None
+    if t.isdigit():
+        if 1 <= len(t) <= 4:
+            return "SA"
+        return None
+    if all(c.isalpha() or c in (".", "-") for c in t):
+        if 1 <= len(t) <= 6:
+            return "US"
+        return None
+    return None
 
 
 def process_commands() -> int:
@@ -97,6 +134,8 @@ def _dispatch(text: str) -> str:
             return _cmd_unfocus(args)
         if cmd == "/watcher":
             return _cmd_watcher(args)
+        if cmd == "/markets":
+            return _cmd_markets()
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -150,6 +189,9 @@ Example: <code>/settime preclose 22:45</code>
 /watcher on — enable watcher
 /watcher off — disable watcher
 
+<b>Markets</b>
+/markets — show ACTIVE_MARKETS + data-source health
+
 <b>Control</b>
 /pause — silence scheduled briefs
 /resume — re-enable briefs
@@ -173,6 +215,13 @@ def _cmd_buy(args: list) -> str:
     if shares <= 0 or price <= 0:
         return "❌ Shares and price must be positive"
 
+    # Phase F guard: SA trade-side support not built yet. Reject SA-shaped
+    # tickers to prevent corrupting TradeLog with mixed-currency rows.
+    if _detect_market(ticker) == "SA":
+        return ("❌ /buy and /sell don't support SA market yet. "
+                "SA support for trades is a future patch. For now, "
+                "record SA trades manually in the TradeLog tab.")
+
     result = trades.record_buy(ticker, shares, price, market="US",
                                reason="Manual /buy command")
     if not result.get("success"):
@@ -193,6 +242,13 @@ def _cmd_sell(args: list) -> str:
         price = float(args[2])
     except ValueError:
         return "❌ Invalid arguments. Use: /sell SPWO 5 31.80"
+
+    # Phase F guard: SA trade-side support not built yet. Reject SA-shaped
+    # tickers to prevent corrupting TradeLog with mixed-currency rows.
+    if _detect_market(ticker) == "SA":
+        return ("❌ /buy and /sell don't support SA market yet. "
+                "SA support for trades is a future patch. For now, "
+                "record SA trades manually in the TradeLog tab.")
 
     result = trades.record_sell(ticker, shares, price, market="US",
                                 reason="Manual /sell command")
@@ -279,12 +335,21 @@ def _cmd_resume() -> str:
 # ---------------------------------------------------------------------------
 
 def _cmd_runlist() -> str:
+    sa_lines = ""
+    if "SA" in ACTIVE_MARKETS:
+        sa_lines = ("\n\n<b>🇸🇦 Saudi (Tadawul)</b>\n"
+                    "<code>/run premarket-sa</code>\n"
+                    "<code>/run midsession-sa</code>\n"
+                    "<code>/run preclose-sa</code>\n"
+                    "<code>/run eod-sa</code>")
     return ("<b>🚀 Manual brief triggers</b>\n"
             "─────────────\n"
+            "<b>🇺🇸 US</b>\n"
             "<code>/run premarket</code> — full pre-market brief\n"
             "<code>/run midsession</code> — mid-session check\n"
             "<code>/run preclose</code> — pre-close verdict\n"
-            "<code>/run eod</code> — end-of-day summary\n\n"
+            "<code>/run eod</code> — end-of-day summary"
+            f"{sa_lines}\n\n"
             "Brief runs in background; the brief Telegram message arrives "
             "in 30–90 seconds. Sending /run again while one is running is "
             "ignored (no duplicate runs / no token waste).\n\n"
@@ -297,15 +362,17 @@ def _cmd_cancel(args: list) -> str:
     analyzed. So damage is capped at one Claude call from the moment
     /cancel is sent."""
     if not args:
+        user_facing = [b.replace("_", "-") for b in VALID_BRIEFS]
         return ("Usage: <code>/cancel BRIEF</code>\n"
-                f"Briefs: {', '.join(VALID_BRIEFS)}\n"
+                f"Briefs: {', '.join(user_facing)}\n"
                 "Example: <code>/cancel premarket</code>\n\n"
                 "Send /status to see what's running.")
 
-    brief = args[0].lower().strip()
+    brief = _normalize_brief_arg(args[0])
     if brief not in VALID_BRIEFS:
-        return (f"❌ Unknown brief: <code>{brief}</code>\n"
-                f"Valid: {', '.join(VALID_BRIEFS)}")
+        user_facing = [b.replace("_", "-") for b in VALID_BRIEFS]
+        return (f"❌ Unknown brief: <code>{args[0]}</code>\n"
+                f"Valid: {', '.join(user_facing)}")
 
     try:
         from webhook import app as webhook_app
@@ -313,15 +380,18 @@ def _cmd_cancel(args: list) -> str:
     except Exception as e:
         return f"❌ Could not reach scheduler: {e}"
 
-    # Watcher uses two _currently_running keys (watcher_price and
-    # watcher_news) but a single "watcher" cancel flag. Check both.
+    # Watcher uses per-(market, mode) _currently_running keys but a
+    # single cancel flag per market. Map the user's brief arg to both.
     if brief == "watcher":
-        with webhook_app._running_lock:
-            is_running = ("watcher_price" in webhook_app._currently_running
-                          or "watcher_news" in webhook_app._currently_running)
+        running_keys = ("watcher_us_price", "watcher_us_news")
+    elif brief == "watcher_sa":
+        running_keys = ("watcher_sa_price", "watcher_sa_news")
     else:
-        with webhook_app._running_lock:
-            is_running = brief in webhook_app._currently_running
+        running_keys = (brief,)
+
+    with webhook_app._running_lock:
+        is_running = any(k in webhook_app._currently_running
+                         for k in running_keys)
 
     if not is_running:
         return (f"ℹ️ <b>{brief}</b> is not currently running.\n"
@@ -342,9 +412,12 @@ def _cmd_run(args: list) -> str:
     if not args:
         return _cmd_runlist()
 
-    brief = args[0].lower().strip()
-    if brief not in VALID_BRIEFS:
-        return (f"❌ Unknown brief: <code>{brief}</code>\n"
+    brief = _normalize_brief_arg(args[0])
+    if brief not in VALID_BRIEFS or brief.startswith("watcher"):
+        # /run watcher and /run watcher_sa are not supported via this
+        # path — the watcher has its own /watcher command surface and
+        # spawn function.
+        return (f"❌ Unknown brief: <code>{args[0]}</code>\n"
                 f"Send /runlist to see options.")
 
     try:
@@ -353,11 +426,12 @@ def _cmd_run(args: list) -> str:
         return f"❌ Could not reach scheduler: {e}"
 
     spawned, reason = webhook_app._spawn_brief(brief, source="telegram")
+    user_facing = brief.replace("_", "-")
     if spawned:
-        return (f"🚀 Running <b>{brief}</b> brief in background…\n"
+        return (f"🚀 Running <b>{user_facing}</b> brief in background…\n"
                 f"<i>Result will arrive in 30–90 seconds.</i>")
     else:
-        return (f"⚠️ <b>{brief}</b> not started — {reason}.\n"
+        return (f"⚠️ <b>{user_facing}</b> not started — {reason}.\n"
                 f"Send /status to see what's running.")
 
 
@@ -486,18 +560,24 @@ def _cmd_ask(args: list) -> str:
 # ---------------------------------------------------------------------------
 
 def _validate_ticker_format(t: str) -> bool:
-    """Cheap check for obviously-invalid input. Doesn't verify existence —
-    that's what _verify_ticker_exists() does, but it costs an API call so
-    we filter obvious garbage first."""
+    """Cheap pre-filter for obviously-invalid ticker input.
+
+    Accepts:
+      - US: 1-6 chars, letters + . or - (e.g. AAPL, BRK.B)
+      - SA: 1-4 digits (Tadawul codes, e.g. 2222)
+    Real existence is checked by _verify_ticker_exists() (US only —
+    SAHMK doesn't have a free 'exists?' endpoint, so SA tickers are
+    accepted on shape alone).
+    """
     if not t:
         return False
     t = t.strip().upper()
     if not (1 <= len(t) <= 6):
         return False
-    # Tickers are uppercase letters, plus rare dot for class shares (BRK.B)
-    # or hyphen for some preferreds. NO digits, NO mixed case input letters,
-    # NO multi-word strings. "GHETTO" passes len/alpha but fails the
-    # all-caps existence check below; this is just the cheap pre-filter.
+    if t.isdigit():
+        # Saudi (Tadawul) codes are 4 digits today; allow 1-4 to be
+        # safe in case of future suffixes like rights issues.
+        return 1 <= len(t) <= 4
     return all(c.isalpha() or c in (".", "-") for c in t)
 
 
@@ -624,9 +704,12 @@ def _validate_ticker(t: str) -> bool:
     return _validate_ticker_format(t)
 
 
-def _default_watchlist() -> list:
-    """Lazy import of US default watchlist."""
+def _default_watchlist(market: str = "US") -> list:
+    """Lazy import of the per-market default watchlist."""
     try:
+        if market.upper() == "SA":
+            from markets.saudi import config as sa_cfg
+            return list(getattr(sa_cfg, "DEFAULT_WATCHLIST", []))
         from markets.us import config as us_cfg
         return list(us_cfg.DEFAULT_WATCHLIST)
     except Exception:
@@ -634,73 +717,104 @@ def _default_watchlist() -> list:
 
 
 def _cmd_list() -> str:
-    """Show current watchlist + focus."""
-    watch = sheets.read_watchlist(default=_default_watchlist())
-    focus_rows = sheets.read_focus()
-    focus = [r.get("Ticker", "") for r in focus_rows if r.get("Ticker")]
-
+    """Show current watchlist + focus, grouped by active market."""
     lines = ["<b>📋 Tracking</b>", "─────────────"]
-    if focus:
-        lines.append(f"<b>🎯 Focus ({len(focus)}/{sheets.FOCUS_LIMIT}):</b> "
-                     + " ".join(f"<code>{t}</code>" for t in focus))
-    else:
-        lines.append(f"<b>🎯 Focus:</b> <i>none</i>")
-    if watch:
-        lines.append(f"<b>👁 Watchlist:</b> "
-                     + " ".join(f"<code>{t}</code>" for t in watch))
-    else:
-        lines.append("<b>👁 Watchlist:</b> <i>empty</i>")
+
+    # Show every ACTIVE market plus US (always shown for legacy users
+    # whose ACTIVE_MARKETS may not be set explicitly). Order: US first,
+    # then SA, then any future markets.
+    markets_to_show = ["US"]
+    for m in ACTIVE_MARKETS:
+        if m not in markets_to_show:
+            markets_to_show.append(m)
+
+    for market in markets_to_show:
+        watch = sheets.read_watchlist(
+            default=_default_watchlist(market), market=market
+        )
+        focus_rows = sheets.read_focus(market=market) or []
+        focus = [r.get("Ticker", "") for r in focus_rows if r.get("Ticker")]
+
+        flag = "🇺🇸" if market == "US" else ("🇸🇦" if market == "SA" else "🌐")
+        lines.append("")
+        lines.append(f"<b>{flag} {market}</b>")
+        if focus:
+            lines.append(f"  🎯 Focus ({len(focus)}/{sheets.FOCUS_LIMIT}): "
+                         + " ".join(f"<code>{t}</code>" for t in focus))
+        else:
+            lines.append("  🎯 Focus: <i>none</i>")
+        if watch:
+            lines.append(f"  👁 Watchlist: "
+                         + " ".join(f"<code>{t}</code>" for t in watch))
+        else:
+            lines.append("  👁 Watchlist: <i>empty</i>")
+
     lines.append("")
-    lines.append("<i>Use /watch /unwatch /focus /unfocus to change.</i>")
+    lines.append("<i>Use /watch /unwatch /focus /unfocus to change. "
+                 "Market is auto-detected from ticker shape.</i>")
     return "\n".join(lines)
 
 
 def _cmd_watch(args: list) -> str:
     if not args:
         return ("Usage: <code>/watch TICKER</code>\n"
-                "Example: <code>/watch NVDA</code>")
+                "Examples: <code>/watch NVDA</code> · "
+                "<code>/watch 2222</code> (Aramco)")
     ticker = args[0].strip().upper()
     if not _validate_ticker_format(ticker):
         return f"❌ <code>{ticker}</code> doesn't look like a valid ticker."
 
-    # Verify the ticker actually exists before adding (one Twelve Data
-    # call, ~free). Stops "/watch ghetto" succeeding silently.
-    check = _verify_ticker_exists(ticker)
-    if not check.get("ok"):
-        return (f"❌ <code>{ticker}</code> isn't a recognized ticker.\n"
-                f"<i>{check.get('error', 'verification failed')}</i>")
+    market = _detect_market(ticker)
+    if market is None:
+        return (f"❌ Can't tell which market <code>{ticker}</code> belongs to.\n"
+                f"<i>Use a US ticker (letters, e.g. NVDA) or an SA "
+                f"Tadawul code (digits, e.g. 2222).</i>")
 
-    current = sheets.read_watchlist(default=_default_watchlist())
+    # Existence check: US only (Twelve Data /quote). SA accepted on
+    # shape — SAHMK doesn't expose a free 'exists?' endpoint, and the
+    # next data fetch will surface a bad ticker via the Logs tab.
+    if market == "US":
+        check = _verify_ticker_exists(ticker)
+        if not check.get("ok"):
+            return (f"❌ <code>{ticker}</code> isn't a recognized ticker.\n"
+                    f"<i>{check.get('error', 'verification failed')}</i>")
+    else:
+        check = {"ok": True, "warning": "SA tickers accepted on shape only"}
+
+    current = sheets.read_watchlist(
+        default=_default_watchlist(market), market=market
+    )
     if ticker in current:
-        # Even if already there, surface the name so user can verify
-        # it's what they expected.
-        summary = _format_ticker_summary(check)
+        summary = _format_ticker_summary(check) if market == "US" else ""
         suffix = f"\n<i>{summary}</i>" if summary else ""
-        return f"ℹ️ <code>{ticker}</code> is already in your watchlist.{suffix}"
+        return (f"ℹ️ <code>{ticker}</code> is already in your "
+                f"{market} watchlist.{suffix}")
 
     new_list = current + [ticker]
-    if not sheets.write_watchlist(new_list):
+    if not sheets.write_watchlist(new_list, market=market):
         return "❌ Failed to save watchlist. Check the Logs tab."
 
-    # Build the response: confirmation + name/type/exchange + any warning
-    lines = [f"✅ Added <code>{ticker}</code> to watchlist."]
+    lines = [f"✅ Added <code>{ticker}</code> to {market} watchlist."]
 
-    summary = _format_ticker_summary(check)
-    if summary:
-        lines.append(f"<i>{summary}</i>")
+    if market == "US":
+        summary = _format_ticker_summary(check)
+        if summary:
+            lines.append(f"<i>{summary}</i>")
+        unusual = _is_unusual_instrument(check)
+        if unusual:
+            lines.append(f"⚠️ <i>{unusual}.</i>")
+            lines.append(f"<i>If you meant something else, /unwatch "
+                         f"{ticker} and try a different symbol.</i>")
+        warning = check.get("warning")
+        if warning:
+            lines.append(f"<i>⚠️ Couldn't verify details ({warning}); "
+                         f"accepted anyway.</i>")
+    else:
+        lines.append(f"<i>SA ticker shape accepted; first data fetch "
+                     f"will confirm it's live.</i>")
 
-    unusual = _is_unusual_instrument(check)
-    if unusual:
-        lines.append(f"⚠️ <i>{unusual}.</i>")
-        lines.append(f"<i>If you meant something else, /unwatch {ticker} "
-                     f"and try a different symbol.</i>")
-
-    warning = check.get("warning")
-    if warning:
-        lines.append(f"<i>⚠️ Couldn't verify ticker details ({warning}); "
-                     f"accepted anyway.</i>")
-
-    lines.append(f"<i>Now tracking {len(new_list)}: {', '.join(new_list)}</i>")
+    lines.append(f"<i>Now tracking {len(new_list)} in {market}: "
+                 f"{', '.join(new_list)}</i>")
     return "\n".join(lines)
 
 
@@ -708,53 +822,72 @@ def _cmd_unwatch(args: list) -> str:
     if not args:
         return "Usage: <code>/unwatch TICKER</code>"
     ticker = args[0].strip().upper()
-    current = sheets.read_watchlist(default=_default_watchlist())
+    market = _detect_market(ticker)
+    if market is None:
+        return (f"❌ Can't tell which market <code>{ticker}</code> belongs "
+                f"to. Use letters for US, digits for SA.")
+    current = sheets.read_watchlist(
+        default=_default_watchlist(market), market=market
+    )
     if ticker not in current:
-        return f"ℹ️ <code>{ticker}</code> isn't in your watchlist.\nSend /list to see what is."
+        return (f"ℹ️ <code>{ticker}</code> isn't in your {market} watchlist."
+                f"\nSend /list to see what is.")
     new_list = [t for t in current if t != ticker]
-    if not sheets.write_watchlist(new_list):
+    if not sheets.write_watchlist(new_list, market=market):
         return "❌ Failed to save watchlist."
-    return (f"✅ Removed <code>{ticker}</code> from watchlist.\n"
-            f"<i>Now tracking {len(new_list)}: "
+    return (f"✅ Removed <code>{ticker}</code> from {market} watchlist.\n"
+            f"<i>Now tracking {len(new_list)} in {market}: "
             f"{', '.join(new_list) if new_list else '(empty)'}</i>")
 
 
 def _cmd_focus(args: list) -> str:
     if not args:
         return ("Usage: <code>/focus TICKER</code>\n"
-                f"Max {sheets.FOCUS_LIMIT} focus tickers; oldest gets dropped.")
+                f"Max {sheets.FOCUS_LIMIT} focus tickers per market; "
+                f"oldest gets dropped.")
     ticker = args[0].strip().upper()
     if not _validate_ticker_format(ticker):
         return f"❌ <code>{ticker}</code> doesn't look like a valid ticker."
 
-    check = _verify_ticker_exists(ticker)
-    if not check.get("ok"):
-        return (f"❌ <code>{ticker}</code> isn't a recognized ticker.\n"
-                f"<i>{check.get('error', 'verification failed')}</i>")
+    market = _detect_market(ticker)
+    if market is None:
+        return (f"❌ Can't tell which market <code>{ticker}</code> belongs "
+                f"to. Use letters for US, digits for SA.")
 
-    result = sheets.add_focus(ticker, market="US")
+    if market == "US":
+        check = _verify_ticker_exists(ticker)
+        if not check.get("ok"):
+            return (f"❌ <code>{ticker}</code> isn't a recognized ticker.\n"
+                    f"<i>{check.get('error', 'verification failed')}</i>")
+    else:
+        check = {"ok": True, "warning": "SA tickers accepted on shape only"}
+
+    result = sheets.add_focus(ticker, market=market)
     if not result.get("ok"):
         return f"❌ {result.get('error', 'Unknown error')}"
 
-    lines = [f"✅ <code>{ticker}</code> added to focus."]
+    lines = [f"✅ <code>{ticker}</code> added to {market} focus."]
 
-    summary = _format_ticker_summary(check)
-    if summary:
-        lines.append(f"<i>{summary}</i>")
-
-    unusual = _is_unusual_instrument(check)
-    if unusual:
-        lines.append(f"⚠️ <i>{unusual}.</i>")
-        lines.append(f"<i>If you meant something else, /unfocus {ticker} "
-                     f"and try a different symbol.</i>")
+    if market == "US":
+        summary = _format_ticker_summary(check)
+        if summary:
+            lines.append(f"<i>{summary}</i>")
+        unusual = _is_unusual_instrument(check)
+        if unusual:
+            lines.append(f"⚠️ <i>{unusual}.</i>")
+            lines.append(f"<i>If you meant something else, /unfocus "
+                         f"{ticker} and try a different symbol.</i>")
+        if check.get("warning"):
+            lines.append(f"<i>⚠️ Couldn't verify details ({check['warning']}); "
+                         f"accepted anyway.</i>")
+    else:
+        lines.append(f"<i>SA ticker shape accepted; first data fetch "
+                     f"will confirm it's live.</i>")
 
     if result.get("dropped"):
         lines.append(f"<i>Dropped <code>{result['dropped']}</code> "
-                     f"(oldest, focus is capped at {sheets.FOCUS_LIMIT}).</i>")
-
-    if check.get("warning"):
-        lines.append(f"<i>⚠️ Couldn't verify ticker details ({check['warning']}); "
-                     f"accepted anyway.</i>")
+                     f"(oldest in {market} focus, "
+                     f"capped at {sheets.FOCUS_LIMIT}).</i>")
 
     return "\n".join(lines)
 
@@ -834,15 +967,17 @@ def _cmd_watcher_status() -> str:
     news_int = _read_int("WATCHER_NEWS_INTERVAL_MIN", PY_NEWS)
     inc_watch = _read_bool("WATCHER_INCLUDE_WATCHLIST", PY_INC_WATCH)
 
-    # Pull live last-run timestamps from the webhook scheduler. If the
-    # webhook module hasn't been imported (e.g. running under main.py
-    # not gunicorn), gracefully say "—".
-    last_price = "—"
-    last_news = "—"
+    # Pull live last-run timestamps from the webhook scheduler. State
+    # keys are per-(market, mode): "us_price", "us_news", "sa_price",
+    # "sa_news". Missing → "—".
+    last = {"us_price": "—", "us_news": "—",
+            "sa_price": "—", "sa_news": "—"}
     try:
         from webhook import app as webhook_app
-        last_price = webhook_app._last_watcher_runs.get("price", "—") or "—"
-        last_news = webhook_app._last_watcher_runs.get("news", "—") or "—"
+        for k in last:
+            v = webhook_app._last_watcher_runs.get(k)
+            if v:
+                last[k] = v
     except Exception:
         pass
 
@@ -857,16 +992,69 @@ def _cmd_watcher_status() -> str:
     lines.append(f"Watchlist included: "
                  f"<code>{'yes' if inc_watch else 'no'}</code>")
     lines.append("")
-    lines.append(f"Last price tick: <code>{last_price}</code>")
-    lines.append(f"Last news tick:  <code>{last_news}</code>")
+    lines.append("<b>🇺🇸 US — last ticks</b>")
+    lines.append(f"  Price: <code>{last['us_price']}</code>")
+    lines.append(f"  News:  <code>{last['us_news']}</code>")
+    if "SA" in ACTIVE_MARKETS:
+        lines.append("")
+        lines.append("<b>🇸🇦 SA — last ticks</b>")
+        lines.append(f"  Price: <code>{last['sa_price']}</code>")
+        lines.append(f"  News:  <code>{last['sa_news']}</code>")
     lines.append("")
-    lines.append("<b>Today's alerts</b>")
+    lines.append("<b>Today's alerts (all markets)</b>")
     if counts:
         for c in counts:
-            lines.append(f"  • <code>{c['Ticker']}</code>: "
+            # Numeric ticker → SA, otherwise US (matches _detect_market)
+            flag = "🇸🇦" if c["Ticker"].isdigit() else "🇺🇸"
+            lines.append(f"  • {flag} <code>{c['Ticker']}</code>: "
                          f"{c['AlertCount']}/{cap}")
     else:
         lines.append("  <i>No alerts sent today.</i>")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# /markets — show ACTIVE_MARKETS state and per-market data-source health
+# ---------------------------------------------------------------------------
+
+def _cmd_markets() -> str:
+    """Display which markets are currently active per the env var, and
+    the on-the-ground status of each market's data sources."""
+    from config import (TWELVE_DATA_KEY, MARKETAUX_KEY, FRED_KEY,
+                        SAHMK_API_KEY)
+
+    lines = ["<b>🌐 MARKETS</b>", "─────────────"]
+    lines.append(f"ACTIVE_MARKETS: <code>{','.join(ACTIVE_MARKETS) or '—'}</code>")
+    lines.append("")
+
+    # US block
+    us_active = "US" in ACTIVE_MARKETS
+    lines.append(f"<b>🇺🇸 US</b> — {'✅ active' if us_active else '⏸ dormant'}")
+    lines.append(f"  Hours (KSA): 16:30–23:00, Mon–Fri")
+    lines.append(f"  Prices: Twelve Data "
+                 f"{'✅' if TWELVE_DATA_KEY else '⚠️ key missing'}")
+    lines.append(f"  News:   Marketaux "
+                 f"{'✅' if MARKETAUX_KEY else '⚠️ key missing'}")
+    lines.append(f"  Macro:  FRED "
+                 f"{'✅' if FRED_KEY else '⚠️ key missing'}")
+    lines.append("")
+
+    # SA block
+    sa_active = "SA" in ACTIVE_MARKETS
+    lines.append(f"<b>🇸🇦 SA</b> — {'✅ active' if sa_active else '⏸ dormant'}")
+    lines.append(f"  Hours (KSA): 10:00–15:00, Sun–Thu")
+    lines.append(f"  Prices: SAHMK "
+                 f"{'✅' if SAHMK_API_KEY else '⚠️ key missing'}")
+    lines.append(f"  News:   Marketaux (.SR suffix) "
+                 f"{'✅' if MARKETAUX_KEY else '⚠️ key missing'}")
+    lines.append(f"  Halal screening: <i>not applied (verify yourself)</i>")
+    if sa_active and not SAHMK_API_KEY:
+        lines.append("")
+        lines.append("⚠️ <b>SA active but SAHMK_API_KEY missing</b> — "
+                     "SA briefs will fail. Set the env var on Railway.")
+    lines.append("")
+    lines.append("<i>Change ACTIVE_MARKETS via Railway env var "
+                 "(e.g. <code>US,SA</code>) and redeploy.</i>")
     return "\n".join(lines)
 
 

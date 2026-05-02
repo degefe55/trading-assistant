@@ -113,3 +113,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL", "")
 # Service account JSON for writing to Google Sheets (added Phase B)
 GOOGLE_SA_JSON = os.getenv("GOOGLE_SA_JSON", "")
+# Sahm KSA — Saudi (Tadawul) market data provider (Phase F).
+# Free tier: 100 requests/day, 15-min delayed prices.
+SAHMK_API_KEY = os.getenv("SAHMK_API_KEY", "")
+SAHMK_BASE_URL = "https://app.sahmk.sa/api/v1"

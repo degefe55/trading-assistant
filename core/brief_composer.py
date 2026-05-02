@@ -22,6 +22,21 @@ INCLUDE_DEEP_DIVE_IN_BRIEFS = False
 # Hint shown in the message footer reminding the user about tap + reply
 TAP_HINT = "<i>📖 Tap a ticker below for deep dive · reply to this msg to ask</i>"
 
+# Footer added to Saudi briefs. Halal screening is intentionally not
+# applied for SA — see markets/saudi/config.py.
+SA_HALAL_DISCLAIMER = ("<i>🇸🇦 Halal screening not applied for the Saudi "
+                       "market — verify Sharia compliance yourself.</i>")
+
+
+def _market_of(a: dict) -> str:
+    """Read the market a single analysis dict belongs to. Defaults to US
+    so legacy analyses (created before Phase F) keep rendering as US."""
+    return (a.get("market") or "US").upper()
+
+
+def _currency_sym(market: str) -> str:
+    return "SAR " if market == "SA" else "$"
+
 
 def build_brief_keyboard(analyses: list) -> list:
     """Inline keyboard for a brief: one '📖 Deep dive: TICKER' row per
@@ -47,21 +62,32 @@ def build_brief_keyboard(analyses: list) -> list:
 
 def compose_premarket_brief(positions_analyses: list, watchlist_analyses: list,
                             focus_analyses: list, scout_analyses: list,
-                            macro: dict, run_cost: float) -> str:
-    """Pre-market brief with scouting."""
+                            macro: dict, run_cost: float,
+                            market: str = "US") -> str:
+    """Pre-market brief with scouting. market='SA' switches header,
+    suppresses pre-open warning (Tadawul opens 10:00 KSA, no DST), and
+    appends the Saudi halal disclaimer footer."""
     now = datetime.now(KSA_TZ)
     all_main = positions_analyses + focus_analyses + watchlist_analyses
 
     parts = []
-    parts.append(f"<b>🔔 PRE-MARKET BRIEF</b>")
+    if market == "SA":
+        parts.append(f"<b>🇸🇦 PRE-MARKET BRIEF · TADAWUL</b>")
+    else:
+        parts.append(f"<b>🔔 PRE-MARKET BRIEF</b>")
     parts.append(f"<i>{now.strftime('%A %b %d · %H:%M KSA')}</i>")
     if MOCK_MODE:
         parts.append(f"<i>⚠️ MOCK MODE</i>")
     if DRY_RUN:
         parts.append(f"<i>[DRY RUN]</i>")
-    # Warn if running before US market open (US opens 16:30 KSA, accounting for DST may shift to 17:30)
-    if now.hour < 16 or (now.hour == 16 and now.minute < 30):
-        parts.append(f"<i>⏰ Pre-market: prices may lag actual open</i>")
+    if market == "US":
+        # US opens 16:30 KSA (DST may shift to 17:30)
+        if now.hour < 16 or (now.hour == 16 and now.minute < 30):
+            parts.append(f"<i>⏰ Pre-market: prices may lag actual open</i>")
+    else:
+        # Tadawul opens 10:00 KSA
+        if now.hour < 10:
+            parts.append(f"<i>⏰ Pre-market: Tadawul opens 10:00 KSA</i>")
     parts.append("")
 
     # URGENT ACTIONS
@@ -136,16 +162,21 @@ def compose_premarket_brief(positions_analyses: list, watchlist_analyses: list,
     parts.append(DIVIDER)
     if not INCLUDE_DEEP_DIVE_IN_BRIEFS and (all_main or scout_analyses):
         parts.append(TAP_HINT)
+    if market == "SA":
+        parts.append(SA_HALAL_DISCLAIMER)
     parts.append(f"<i>💰 Run cost: ${run_cost:.4f}</i>")
     return "\n".join(parts)
 
 
-def compose_midsession_check(material_changes: list, run_cost: float) -> str:
+def compose_midsession_check(material_changes: list, run_cost: float,
+                             market: str = "US") -> str:
     """Mid-session alert - only sent if material change. Silent otherwise."""
     if not material_changes:
         return ""
     now = datetime.now(KSA_TZ)
-    parts = [f"<b>⚡ MID-SESSION</b>", f"<i>{now.strftime('%H:%M KSA')}</i>"]
+    header = ("⚡ MID-SESSION · 🇸🇦 TADAWUL" if market == "SA"
+              else "⚡ MID-SESSION")
+    parts = [f"<b>{header}</b>", f"<i>{now.strftime('%H:%M KSA')}</i>"]
     if MOCK_MODE:
         parts.append(f"<i>⚠️ MOCK MODE</i>")
     parts.append("")
@@ -176,14 +207,20 @@ def compose_midsession_check(material_changes: list, run_cost: float) -> str:
         parts.append(TAP_HINT)
         parts.append("")
 
+    if market == "SA":
+        parts.append(SA_HALAL_DISCLAIMER)
     parts.append(f"<i>💰 ${run_cost:.4f}</i>")
     return "\n".join(parts)
 
 
-def compose_preclose_verdict(positions_analyses: list, run_cost: float) -> str:
+def compose_preclose_verdict(positions_analyses: list, run_cost: float,
+                             market: str = "US") -> str:
     """Pre-close: hold overnight or exit."""
     now = datetime.now(KSA_TZ)
-    parts = [f"<b>🔔 PRE-CLOSE</b>", f"<i>{now.strftime('%H:%M KSA')} · 30 min to close</i>"]
+    header = ("🇸🇦 PRE-CLOSE · TADAWUL" if market == "SA"
+              else "🔔 PRE-CLOSE")
+    parts = [f"<b>{header}</b>",
+             f"<i>{now.strftime('%H:%M KSA')} · 30 min to close</i>"]
     if MOCK_MODE:
         parts.append(f"<i>⚠️ MOCK MODE</i>")
     parts.append("")
@@ -219,18 +256,27 @@ def compose_preclose_verdict(positions_analyses: list, run_cost: float) -> str:
         parts.append(TAP_HINT)
         parts.append("")
 
+    if market == "SA":
+        parts.append(SA_HALAL_DISCLAIMER)
     parts.append(f"<i>💰 ${run_cost:.4f}</i>")
     return "\n".join(parts)
 
 
 def compose_eod_summary(positions, realized_today, unrealized,
-                        cumulative_realized, trades_today, run_cost) -> str:
-    """End of day P&L."""
+                        cumulative_realized, trades_today, run_cost,
+                        market: str = "US") -> str:
+    """End of day P&L. P&L numbers come from the trades module which
+    tracks USD; SAR per-position display is rendered in the positions
+    list at the bottom. Per-market currency separation lives in the
+    composer and is informational only here — the bottom-line totals
+    remain in USD per the existing pipeline."""
     now = datetime.now(KSA_TZ)
     total_today = realized_today + unrealized
     emoji = "🟢" if total_today >= 0 else "🔴"
 
-    parts = [f"<b>📈 END OF DAY</b>", f"<i>{now.strftime('%A %b %d')}</i>"]
+    header = ("📈 END OF DAY · 🇸🇦 TADAWUL" if market == "SA"
+              else "📈 END OF DAY")
+    parts = [f"<b>{header}</b>", f"<i>{now.strftime('%A %b %d')}</i>"]
     if MOCK_MODE:
         parts.append(f"<i>⚠️ MOCK MODE</i>")
     parts.append("")
@@ -259,11 +305,14 @@ def compose_eod_summary(positions, realized_today, unrealized,
     if positions:
         parts.append(f"<b>Open Positions</b>")
         parts.append(SUBDIV)
+        currency_sym = "SAR " if market == "SA" else "$"
         for p in positions:
             parts.append(f"  {p.get('Ticker')}: {p.get('Shares')} sh @ "
-                         f"${p.get('AvgCost_USD')}")
+                         f"{currency_sym}{p.get('AvgCost_USD')}")
     parts.append("")
 
+    if market == "SA":
+        parts.append(SA_HALAL_DISCLAIMER)
     parts.append(f"<i>💰 ${run_cost:.4f}</i>")
     return "\n".join(parts)
 
@@ -277,29 +326,36 @@ def _urgent_line(a: dict) -> str:
     action = an.get("action", "?")
     price = an.get("action_price") or a.get("price", "?")
     plan = an.get("one_line_plan", "")
-    return f"{_action_icon(action)} <b>{action} {ticker}</b> @ <code>${price}</code> — {plan}"
+    sym = _currency_sym(_market_of(a))
+    return (f"{_action_icon(action)} <b>{action} {ticker}</b> @ "
+            f"<code>{sym}{price}</code> — {plan}")
 
 
 def _position_line(a: dict):
     ticker = a.get("ticker", "?")
+    market = _market_of(a)
     position = a.get("position") or {}
-    price_now = a.get("price", 0)
-    shares = float(position.get("Shares", 0))
-    avg = float(position.get("AvgCost_USD", 0))
+    price_now = a.get("price", 0) or 0
+    shares = float(position.get("Shares", 0) or 0)
+    avg = float(position.get("AvgCost_USD", 0) or 0)
     pnl = (price_now - avg) * shares if shares and avg else 0
     pnl_pct = ((price_now - avg) / avg * 100) if avg else 0
     emoji = "🟢" if pnl >= 0 else "🔴"
 
+    # Halal badge: US only. SA briefs carry the disclaimer footer
+    # explaining we don't apply per-ticker halal screening for Tadawul.
     badges = []
-    if a.get("halal_listed"):
-        badges.append("✅")
-    ai_sig = a.get("analysis", {}).get("halal_ai_signal")
-    if ai_sig in ("🟢", "🟡", "🔴"):
-        badges.append(ai_sig)
+    if market != "SA":
+        if a.get("halal_listed"):
+            badges.append("✅")
+        ai_sig = a.get("analysis", {}).get("halal_ai_signal")
+        if ai_sig in ("🟢", "🟡", "🔴"):
+            badges.append(ai_sig)
     badge_str = " " + "".join(badges) if badges else ""
 
+    sym = _currency_sym(market)
     return (f"{emoji} <b>{ticker}</b>{badge_str}  "
-            f"<code>{int(shares)}sh · ${avg}→${price_now}</code>  "
+            f"<code>{int(shares)}sh · {sym}{avg}→{sym}{price_now}</code>  "
             f"<b>{pnl:+.2f}</b> ({pnl_pct:+.1f}%)", pnl)
 
 

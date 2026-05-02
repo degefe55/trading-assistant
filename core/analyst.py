@@ -28,12 +28,16 @@ class BriefCancelled(Exception):
 
 # Cancellation flag — set by /cancel command via webhook/app.py.
 # A simple module-level dict is enough because Railway runs one process.
-# "watcher" added in Phase D.5 so /cancel watcher (and HTTP
-# /cancel/watcher) can stop a mid-flight watcher tick between tickers.
+# "watcher" added in Phase D.5; SA-suffixed entries added in Phase F so
+# /cancel premarket-sa etc. (mapped to underscored internal names) can
+# stop a mid-flight Saudi brief between tickers.
 _cancel_flags = {
     "premarket": False, "midsession": False,
     "preclose": False, "eod": False,
     "watcher": False,
+    "premarket_sa": False, "midsession_sa": False,
+    "preclose_sa": False, "eod_sa": False,
+    "watcher_sa": False,
 }
 
 
@@ -91,16 +95,22 @@ def analyze_ticker(ticker: str, market: str = "US",
     # Check cancellation BEFORE any expensive work (data fetch + Claude call)
     _check_cancelled(context_type)
 
-    log_event("INFO", "analyst", f"Analyzing {ticker} ({context_type})")
+    log_event("INFO", "analyst", f"Analyzing {ticker} ({context_type}, {market})")
 
-    price = data_router.get_price(ticker)
-    history = data_router.get_price_history(ticker, 60)
-    news = data_router.get_news([ticker], hours_back=36)
-    macro = data_router.get_macro()
+    price = data_router.get_price(ticker, market=market)
+    history = data_router.get_price_history(ticker, 60, market=market)
+    news = data_router.get_news([ticker], hours_back=36, market=market)
+    macro = data_router.get_macro(market=market)
     tech = technical.full_technical_snapshot(history)
-    earnings = data_router.get_earnings(ticker)
-    dividend = data_router.get_dividend(ticker)
-    halal_info = halal.check_halal_listed(ticker, market)
+    earnings = data_router.get_earnings(ticker, market=market)
+    dividend = data_router.get_dividend(ticker, market=market)
+    # Halal screening is intentionally NOT applied for SA (Tadawul
+    # screens at the exchange level; user verifies). For US, retain the
+    # existing dual-signal flow.
+    if market == "SA":
+        halal_info = {"listed": False, "source": "skipped_for_sa"}
+    else:
+        halal_info = halal.check_halal_listed(ticker, market)
 
     system_prompt = claude_client.load_prompt("analyst")
     user_prompt = _build_user_prompt(
@@ -224,7 +234,22 @@ def _error_result(ticker, market, price, error_msg, meta, raw_response=None):
 def _build_user_prompt(ticker, market, context_type, price, tech, news,
                        macro, earnings, dividend, position, halal_info):
     """Compose the user-side prompt with all data."""
-    sar_price = price.get("price", 0) * USD_TO_SAR
+    raw_price = price.get("price", 0) or 0
+
+    # Currency display branches by market. SAHMK returns SAR-native
+    # prices; show SAR primary and USD secondary. Twelve Data returns
+    # USD-native; show USD primary and SAR secondary.
+    if market == "SA":
+        sar_value = raw_price
+        usd_value = sar_value / USD_TO_SAR if USD_TO_SAR else 0
+        price_line = (f"PRICE: SAR {sar_value} (USD {usd_value:.2f}) | "
+                      f"Today {price.get('change_pct')}%")
+        currency_sym = "SAR "
+    else:
+        sar_value = raw_price * USD_TO_SAR
+        price_line = (f"PRICE: ${raw_price} (SAR {sar_value:.2f}) | "
+                      f"Today {price.get('change_pct')}%")
+        currency_sym = "$"
 
     news_lines = []
     for n in news[:5]:
@@ -235,38 +260,47 @@ def _build_user_prompt(ticker, market, context_type, price, tech, news,
 
     macro_lines = [f"  {m.get('label', c)}: {m.get('value')}{m.get('unit', '')}"
                    for c, m in macro.items()]
-    macro_block = "\n".join(macro_lines)
+    macro_block = "\n".join(macro_lines) or "  (macro data unavailable for this market)"
 
     if position and position.get("Ticker") == ticker:
         shares = float(position.get("Shares", 0) or 0)
         avg = float(position.get("AvgCost_USD", 0) or 0)
-        pnl = (price["price"] - avg) * shares if shares and avg else 0
+        pnl = (raw_price - avg) * shares if shares and avg else 0
         pos_block = (f"HELD POSITION:\n"
                      f"  Shares: {shares}\n"
-                     f"  Avg Cost: ${avg}\n"
-                     f"  Stop Loss: ${position.get('StopLoss')}\n"
-                     f"  Target: ${position.get('Target')}\n"
-                     f"  Current P&L: ${pnl:+.2f}")
+                     f"  Avg Cost: {currency_sym}{avg}\n"
+                     f"  Stop Loss: {currency_sym}{position.get('StopLoss')}\n"
+                     f"  Target: {currency_sym}{position.get('Target')}\n"
+                     f"  Current P&L: {currency_sym}{pnl:+.2f}")
     else:
         pos_block = "POSITION: None (evaluating entry)"
 
     signals_block = "\n".join(f"  • {s}" for s in tech.get("signals", [])) or "  (insufficient history)"
-    earnings_block = f"Next earnings: {earnings}" if earnings else "No earnings data available"
+    earnings_block = (f"Next earnings: {earnings}" if earnings
+                      else "No earnings data available")
     dividend_block = ""
     if dividend:
         dividend_block = (f"\nDIVIDEND: ex-date {dividend.get('ex_date')}, "
                           f"${dividend.get('amount')} ({dividend.get('yield_pct')}% yield)")
-    halal_block = (f"HALAL CONTEXT: On approved list = {halal_info['listed']}. "
-                   f"Assess 🟢/🟡/🔴 based on business model; informational only.")
+
+    if market == "SA":
+        halal_block = ("HALAL CONTEXT: Saudi market — exchange-level "
+                       "Sharia screening is assumed; this bot does NOT "
+                       "perform a per-ticker halal assessment. Set "
+                       "halal_ai_signal to 🟢 unless the company's core "
+                       "business is clearly non-compliant.")
+    else:
+        halal_block = (f"HALAL CONTEXT: On approved list = {halal_info['listed']}. "
+                       f"Assess 🟢/🟡/🔴 based on business model; informational only.")
 
     return f"""CONTEXT: {context_type} briefing for {ticker} ({market})
 Time: {datetime.now().strftime('%Y-%m-%d %H:%M KSA')}
 {_market_status_note()}
 
-PRICE: ${price.get('price')} (SAR {sar_price:.2f}) | Today {price.get('change_pct')}%
-Open ${price.get('open')} | High ${price.get('high')} | Low ${price.get('low')}
-52-week: ${price.get('52w_low')} - ${price.get('52w_high')}
-Volume: {price.get('volume'):,}
+{price_line}
+Open {currency_sym}{price.get('open')} | High {currency_sym}{price.get('high')} | Low {currency_sym}{price.get('low')}
+52-week: {currency_sym}{price.get('52w_low')} - {currency_sym}{price.get('52w_high')}
+Volume: {(price.get('volume') or 0):,}
 
 TECHNICAL:
   SMA20: {tech.get('sma_20')} | SMA50: {tech.get('sma_50')} | RSI14: {tech.get('rsi_14')}

@@ -27,33 +27,46 @@ from core import (analyst, brief_composer, sheets, telegram_client,
                   data_router, claude_client)
 from core.logger import log_event
 from markets.us import config as us_cfg
+from markets.saudi import config as sa_cfg
 
 
 PAUSE_FILE = "/tmp/bot_paused.txt"
 
-# US market hours in KSA. Same window as markets/us/config.py — kept
-# local so we don't reach into a market-specific module for a gate that
-# is conceptually a watcher concern. If DST shifts the window, the
-# off-hours skip just becomes a bit conservative for an hour or two,
-# which is harmless.
+# Market hours in KSA. US window kept local so we don't reach into a
+# market-specific module for a gate that is conceptually a watcher
+# concern. If US DST shifts the window, the off-hours skip just becomes
+# a bit conservative for an hour or two, which is harmless.
 US_OPEN_KSA = dtime(16, 30)
 US_CLOSE_KSA = dtime(23, 0)
+SA_OPEN_KSA = dtime(10, 0)
+SA_CLOSE_KSA = dtime(15, 0)
+# Saudi trading days: Sun-Thu. Python weekday(): Sun=6, Mon=0, ..., Thu=3.
+SA_TRADING_WEEKDAYS = {6, 0, 1, 2, 3}
 
 
 # ---------------------------------------------------------------------------
 # Gates
 # ---------------------------------------------------------------------------
 
-def _is_market_hours_now() -> bool:
+def _is_market_hours_now(market: str = "US") -> bool:
     now = datetime.now(KSA_TZ)
-    if now.weekday() >= 5:  # Sat=5, Sun=6
-        return False
     t = now.time()
+    if market == "SA":
+        if now.weekday() not in SA_TRADING_WEEKDAYS:
+            return False
+        return SA_OPEN_KSA <= t <= SA_CLOSE_KSA
+    # US: Mon-Fri, 16:30–23:00 KSA
+    if now.weekday() >= 5:
+        return False
     return US_OPEN_KSA <= t <= US_CLOSE_KSA
 
 
 def _is_paused() -> bool:
     return os.path.exists(PAUSE_FILE)
+
+
+def _cancel_key(market: str) -> str:
+    return "watcher_sa" if market == "SA" else "watcher"
 
 
 def _resolve(cfg: dict, key: str, fallback, parser):
@@ -85,52 +98,64 @@ def _settings() -> dict:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run_watcher_check(mode: str = "price") -> dict:
-    """Run one watcher tick.
+def run_watcher_check(mode: str = "price", market: str = "US") -> dict:
+    """Run one watcher tick for the given market.
 
-    mode = "price" → fetch price only, run Haiku with price context.
-    mode = "news"  → fetch price + news, run Haiku with both contexts.
-
-    Returns a summary dict for the scheduler / /run endpoint to log.
+    mode   = "price" → fetch price only, run Haiku with price context.
+    mode   = "news"  → fetch price + news, run Haiku with both contexts.
+    market = "US"    → US tickers, US market hours (Mon-Fri 16:30-23:00 KSA).
+    market = "SA"    → SA tickers, Tadawul hours (Sun-Thu 10:00-15:00 KSA).
     """
     if mode not in ("price", "news"):
         log_event("WARN", "watcher", f"Unknown mode '{mode}', defaulting to price")
         mode = "price"
+    if market not in ("US", "SA"):
+        log_event("WARN", "watcher",
+                  f"Unknown market '{market}', defaulting to US")
+        market = "US"
 
-    # Gate 1: market hours
-    if not _is_market_hours_now():
-        log_event("INFO", "watcher", f"Tick skipped (mode={mode}): off-hours")
-        return {"ran": False, "skipped_reason": "off-hours", "mode": mode}
+    log_tag = f"{market.lower()}/{mode}"
+    cancel_key = _cancel_key(market)
 
-    # Gate 2: US market enabled
-    if "US" not in ACTIVE_MARKETS:
-        log_event("INFO", "watcher", f"Tick skipped (mode={mode}): US not active")
-        return {"ran": False, "skipped_reason": "us-inactive", "mode": mode}
+    # Gate 1: market hours (per market)
+    if not _is_market_hours_now(market):
+        log_event("INFO", "watcher", f"Tick skipped ({log_tag}): off-hours")
+        return {"ran": False, "skipped_reason": "off-hours",
+                "mode": mode, "market": market}
 
-    # Gate 3: /pause
+    # Gate 2: market in ACTIVE_MARKETS
+    if market not in ACTIVE_MARKETS:
+        log_event("INFO", "watcher",
+                  f"Tick skipped ({log_tag}): {market} not in ACTIVE_MARKETS")
+        return {"ran": False, "skipped_reason": "market-inactive",
+                "mode": mode, "market": market}
+
+    # Gate 3: /pause (applies to both markets)
     if _is_paused():
-        log_event("INFO", "watcher", f"Tick skipped (mode={mode}): paused")
-        return {"ran": False, "skipped_reason": "paused", "mode": mode}
+        log_event("INFO", "watcher", f"Tick skipped ({log_tag}): paused")
+        return {"ran": False, "skipped_reason": "paused",
+                "mode": mode, "market": market}
 
-    # Gate 4: WATCHER_ENABLED
+    # Gate 4: WATCHER_ENABLED (single flag covers both markets — disabling
+    # silences SA and US together, by design)
     settings = _settings()
     if not settings["enabled"]:
-        log_event("INFO", "watcher", f"Tick skipped (mode={mode}): disabled")
-        return {"ran": False, "skipped_reason": "disabled", "mode": mode}
+        log_event("INFO", "watcher", f"Tick skipped ({log_tag}): disabled")
+        return {"ran": False, "skipped_reason": "disabled",
+                "mode": mode, "market": market}
 
-    # Reset cancel flag at start of run; /cancel watcher will flip it
-    # back to True between tickers.
-    analyst.reset_cancel("watcher")
+    # Reset cancel flag at start of run
+    analyst.reset_cancel(cancel_key)
 
-    tickers = _gather_tickers(settings["include_watchlist"])
+    tickers = _gather_tickers(settings["include_watchlist"], market=market)
     if not tickers:
         log_event("INFO", "watcher",
-                  f"Tick: no tickers tracked (mode={mode}); silent no-op")
-        return {"ran": True, "mode": mode, "tickers_checked": 0,
-                "alerts_sent": 0, "alerts_capped": 0}
+                  f"Tick ({log_tag}): no tickers tracked; silent no-op")
+        return {"ran": True, "mode": mode, "market": market,
+                "tickers_checked": 0, "alerts_sent": 0, "alerts_capped": 0}
 
     log_event("INFO", "watcher",
-              f"Tick start (mode={mode}, tickers={len(tickers)}, "
+              f"Tick start ({log_tag}, tickers={len(tickers)}, "
               f"cap={settings['alert_cap']})")
 
     today_str = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
@@ -141,69 +166,68 @@ def run_watcher_check(mode: str = "price") -> dict:
 
     try:
         for tinfo in tickers:
-            # Honor /cancel watcher between tickers
-            analyst._check_cancelled("watcher")
+            analyst._check_cancelled(cancel_key)
 
             ticker = tinfo["ticker"]
             position = tinfo["position"]
 
             try:
-                price = data_router.get_price(ticker)
+                price = data_router.get_price(ticker, market=market)
             except Exception as e:
                 log_event("WARN", "watcher",
-                          f"Price fetch failed for {ticker}: {e}")
+                          f"Price fetch failed for {ticker} ({log_tag}): {e}")
                 continue
 
             news = []
             if mode == "news":
                 try:
-                    news = data_router.get_news([ticker], hours_back=2) or []
+                    news = data_router.get_news([ticker], hours_back=2,
+                                                market=market) or []
                 except Exception as e:
                     log_event("WARN", "watcher",
-                              f"News fetch failed for {ticker}: {e}")
+                              f"News fetch failed for {ticker} ({log_tag}): {e}")
 
             verdict = _run_haiku_filter(ticker, mode, price, news, position)
 
             if not verdict["material"]:
                 flagged_quiet += 1
                 log_event("INFO", "watcher",
-                          f"{ticker} QUIET (mode={mode})")
+                          f"{ticker} QUIET ({log_tag})")
                 continue
 
-            # Material — check cooldown before paying for Sonnet
             current_count = sheets.read_cooldown(ticker, today_str)
             if current_count >= settings["alert_cap"]:
                 alerts_capped += 1
                 log_event("INFO", "watcher",
-                          f"{ticker} flagged MATERIAL "
+                          f"{ticker} flagged MATERIAL ({log_tag}) "
                           f"({verdict['reason'][:80]}) but cap hit "
                           f"({current_count}/{settings['alert_cap']}); "
                           f"not sending")
                 continue
 
             sent = _send_watcher_alert(
-                ticker, verdict["reason"], price, news, position, mode
+                ticker, verdict["reason"], price, news, position, mode,
+                market=market,
             )
             if sent:
                 alerts_sent += 1
                 sheets.bump_cooldown(ticker, today_str)
-            # If send failed, _send_watcher_alert already logged the reason.
-            # Don't bump cooldown on failure — user got nothing, no cap hit.
 
     except analyst.BriefCancelled:
         cancelled = True
         log_event("WARN", "watcher",
-                  f"Watcher cancelled mid-tick (sent {alerts_sent} "
-                  f"of {len(tickers)} considered)")
+                  f"Watcher cancelled mid-tick ({log_tag}, sent "
+                  f"{alerts_sent} of {len(tickers)} considered)")
 
     log_event("INFO", "watcher",
-              f"Tick done (mode={mode}, sent={alerts_sent}, "
+              f"Tick done ({log_tag}, sent={alerts_sent}, "
               f"capped={alerts_capped}, quiet={flagged_quiet}, "
               f"cancelled={cancelled})")
 
     return {
         "ran": True,
         "mode": mode,
+        "market": market,
         "tickers_checked": len(tickers),
         "alerts_sent": alerts_sent,
         "alerts_capped": alerts_capped,
@@ -216,36 +240,49 @@ def run_watcher_check(mode: str = "price") -> dict:
 # Ticker gathering
 # ---------------------------------------------------------------------------
 
-def _gather_tickers(include_watchlist: bool) -> list:
-    """Return [{ticker, position}] — positions first, then focus, then
-    optionally watchlist. Deduped by ticker; first-seen wins (so a held
-    ticker keeps its position dict even if also in focus).
-    """
-    positions = sheets.read_positions() or []
-    focus = sheets.read_focus() or []
-
-    us_positions = [p for p in positions if p.get("Market", "US") == "US"]
-    us_focus = [f for f in focus if f.get("Market", "US") == "US"]
+def _gather_tickers(include_watchlist: bool, market: str = "US") -> list:
+    """Return [{ticker, position}] for the given market — positions first,
+    then focus (or SA defaults if focus is empty), then optionally
+    watchlist. Deduped by ticker; first-seen wins."""
+    positions = sheets.read_positions(market=market) or []
+    focus = sheets.read_focus(market=market) or []
 
     seen = set()
     out = []
 
-    for p in us_positions:
+    for p in positions:
         t = (p.get("Ticker") or "").strip().upper()
         if not t or t in seen:
             continue
         seen.add(t)
         out.append({"ticker": t, "position": p})
 
-    for f in us_focus:
-        t = (f.get("Ticker") or "").strip().upper()
-        if not t or t in seen:
-            continue
-        seen.add(t)
-        out.append({"ticker": t, "position": None})
+    if focus:
+        for f in focus:
+            t = (f.get("Ticker") or "").strip().upper()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append({"ticker": t, "position": None})
+    elif market == "SA":
+        # Empty SA focus → fall back to spec defaults so the watcher
+        # has something meaningful to monitor on day one.
+        for raw in sa_cfg.DEFAULT_FOCUS:
+            t = (raw or "").strip().upper()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append({"ticker": t, "position": None})
 
     if include_watchlist:
-        watch = sheets.read_watchlist(default=us_cfg.DEFAULT_WATCHLIST)
+        if market == "SA":
+            watch = sheets.read_watchlist(
+                default=sa_cfg.DEFAULT_WATCHLIST, market="SA"
+            )
+        else:
+            watch = sheets.read_watchlist(
+                default=us_cfg.DEFAULT_WATCHLIST, market="US"
+            )
         for raw in watch:
             t = (raw or "").strip().upper()
             if not t or t in seen:
@@ -373,7 +410,8 @@ def _build_filter_data_block(ticker, mode, price, news, position) -> str:
 # Sonnet alert
 # ---------------------------------------------------------------------------
 
-def _send_watcher_alert(ticker, reason, price, news, position, mode) -> bool:
+def _send_watcher_alert(ticker, reason, price, news, position, mode,
+                        market: str = "US") -> bool:
     """Run the Sonnet alert prompt, persist the recommendation, send the
     Telegram alert with a deep-dive button, record MessageMap.
 
@@ -386,7 +424,7 @@ def _send_watcher_alert(ticker, reason, price, news, position, mode) -> bool:
         return False
 
     user_prompt = _build_alert_user_block(
-        ticker, reason, price, news, position, mode
+        ticker, reason, price, news, position, mode, market=market
     )
 
     response, meta = claude_client.call_analyst(system, user_prompt)
@@ -403,14 +441,16 @@ def _send_watcher_alert(ticker, reason, price, news, position, mode) -> bool:
                   data={"raw_first_500": response[:500]})
         return False
 
-    # Persist to Recommendations so /ask + threaded reply + deep-dive
-    # button all work the same as a regular brief alert.
+    # brief_type for the recommendation row distinguishes US vs SA
+    # watcher alerts so /ask + Reports analytics can split by market.
+    rec_brief_type = "watcher_sa" if market == "SA" else "watcher"
+
     rec_id = ""
     try:
         rec_id = sheets.append_recommendation({
-            "brief_type": "watcher",
+            "brief_type": rec_brief_type,
             "ticker": ticker,
-            "market": "US",
+            "market": market,
             "price_at_call": price.get("price"),
             "analysis": parsed,
             "data_snapshot": {
@@ -426,7 +466,10 @@ def _send_watcher_alert(ticker, reason, price, news, position, mode) -> bool:
         log_event("WARN", "watcher",
                   f"Recommendation persist failed for {ticker}: {e}")
 
-    text = _format_alert_message(ticker, reason, parsed, meta)
+    # The composed analysis dict needs the market field so the deep-
+    # dive renderer (and future re-rendering) treats it as SA.
+    parsed_for_render = dict(parsed)
+    text = _format_alert_message(ticker, reason, parsed, meta, market=market)
 
     keyboard = None
     if rec_id:
@@ -443,18 +486,19 @@ def _send_watcher_alert(ticker, reason, price, news, position, mode) -> bool:
 
     if rec_id:
         try:
-            sheets.record_message_recids(msg_id, "watcher", [rec_id])
+            sheets.record_message_recids(msg_id, rec_brief_type, [rec_id])
         except Exception as e:
             log_event("WARN", "watcher",
                       f"MessageMap write failed for watcher alert: {e}")
 
     log_event("INFO", "watcher",
-              f"Sent watcher alert: {ticker} "
+              f"Sent watcher alert: {ticker} ({market}) "
               f"{parsed.get('action', '?')} (rec {rec_id})")
     return True
 
 
-def _format_alert_message(ticker, reason, parsed, meta) -> str:
+def _format_alert_message(ticker, reason, parsed, meta,
+                          market: str = "US") -> str:
     now = datetime.now(KSA_TZ).strftime("%H:%M KSA")
     action = parsed.get("action", "?")
     one_line = parsed.get("one_line_plan", "")
@@ -463,19 +507,38 @@ def _format_alert_message(ticker, reason, parsed, meta) -> str:
     icon = brief_composer._action_icon(action)
     cost = float(meta.get("cost_usd", 0) or 0)
 
+    flag = "🇸🇦 " if market == "SA" else ""
+    suffix = ""
+    if market == "SA":
+        suffix = ("\n\n<i>🇸🇦 Halal screening not applied — verify Sharia "
+                  "compliance yourself.</i>")
+
     return (
-        f"🔔 <b>Watcher alert</b> · <b>{ticker}</b> · <i>{now}</i>\n"
+        f"🔔 <b>{flag}Watcher alert</b> · <b>{ticker}</b> · <i>{now}</i>\n"
         f"─────────────\n"
         f"<i>Trigger:</i> {reason}\n"
         f"{icon} <b>{action}</b>: {one_line} "
         f"<i>[{confidence}·risk {risk}/5]</i>\n\n"
-        f"<i>📖 Tap for deep dive · reply to this msg to ask</i>\n"
+        f"<i>📖 Tap for deep dive · reply to this msg to ask</i>"
+        f"{suffix}\n"
         f"<i>💰 ${cost:.4f}</i>"
     )
 
 
-def _build_alert_user_block(ticker, reason, price, news, position, mode) -> str:
-    sar_price = (price.get("price") or 0) * USD_TO_SAR
+def _build_alert_user_block(ticker, reason, price, news, position, mode,
+                            market: str = "US") -> str:
+    raw_price = price.get("price") or 0
+    if market == "SA":
+        sar_value = raw_price
+        usd_value = sar_value / USD_TO_SAR if USD_TO_SAR else 0
+        price_line = (f"Current: SAR {sar_value} (USD {usd_value:.2f}) | "
+                      f"Today {price.get('change_pct')}%")
+        sym = "SAR "
+    else:
+        sar_value = raw_price * USD_TO_SAR
+        price_line = (f"Current: ${raw_price} (SAR {sar_value:.2f}) | "
+                      f"Today {price.get('change_pct')}%")
+        sym = "$"
 
     news_lines = []
     for n in news[:5]:
@@ -488,21 +551,26 @@ def _build_alert_user_block(ticker, reason, price, news, position, mode) -> str:
     if position:
         shares = float(position.get("Shares", 0) or 0)
         avg = float(position.get("AvgCost_USD", 0) or 0)
-        cur = price.get("price", 0) or 0
-        pnl = (cur - avg) * shares if shares and avg else 0
+        pnl = (raw_price - avg) * shares if shares and avg else 0
         pos_block = (
             f"HELD POSITION:\n"
             f"  Shares: {shares}\n"
-            f"  Avg Cost: ${avg}\n"
-            f"  Stop Loss: ${position.get('StopLoss')}\n"
-            f"  Target: ${position.get('Target')}\n"
-            f"  Current P&L: ${pnl:+.2f}"
+            f"  Avg Cost: {sym}{avg}\n"
+            f"  Stop Loss: {sym}{position.get('StopLoss')}\n"
+            f"  Target: {sym}{position.get('Target')}\n"
+            f"  Current P&L: {sym}{pnl:+.2f}"
         )
     else:
         pos_block = "POSITION: none (this is a watched ticker, not held)"
 
+    halal_note = ""
+    if market == "SA":
+        halal_note = ("\nHALAL CONTEXT: Saudi market — exchange-level Sharia "
+                      "screening is assumed. Set halal_ai_signal to 🟢 unless "
+                      "the company's core business is clearly non-compliant.\n")
+
     return f"""WATCHER ALERT CONTEXT
-Ticker: {ticker}
+Ticker: {ticker} ({market})
 Tick mode: {mode}
 Time: {datetime.now(KSA_TZ).strftime('%Y-%m-%d %H:%M KSA')}
 
@@ -513,14 +581,14 @@ DATA before relying on it):
   {reason}
 
 PRICE:
-  Current: ${price.get('price')} (SAR {sar_price:.2f}) | Today {price.get('change_pct')}%
-  Open ${price.get('open')} | High ${price.get('high')} | Low ${price.get('low')}
+  {price_line}
+  Open {sym}{price.get('open')} | High {sym}{price.get('high')} | Low {sym}{price.get('low')}
 
 NEWS (last 2 hours):
 {news_block}
 
 {pos_block}
-
+{halal_note}
 RULES:
   Stop loss = average cost on any BUY (never lose money on a trade)
   Max position size: {DEFAULT_RULES['max_position_pct']}% of portfolio

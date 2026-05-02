@@ -127,28 +127,39 @@ def initialize_sheet():
 # ============================================================
 # READERS
 # ============================================================
-def read_positions() -> list:
-    """Return list of position dicts."""
+def read_positions(market: str = None) -> list:
+    """Return list of position dicts, optionally filtered to one market.
+    market=None → all markets (legacy behavior). Otherwise filters the
+    Market column case-insensitively, defaulting unset cells to 'US'."""
     ss = _get_spreadsheet()
     if ss is None:
         return []
     try:
         ws = ss.worksheet("Positions")
         records = ws.get_all_records()
+        if market:
+            m = market.upper()
+            return [r for r in records
+                    if str(r.get("Market", "US") or "US").upper() == m]
         return records
     except Exception as e:
         log_event("ERROR", "sheets", f"Read positions failed: {e}")
         return []
 
 
-def read_focus() -> list:
-    """Return focus stock list."""
+def read_focus(market: str = None) -> list:
+    """Return focus stock list, optionally filtered to one market."""
     ss = _get_spreadsheet()
     if ss is None:
         return []
     try:
         ws = ss.worksheet("Focus")
-        return ws.get_all_records()
+        records = ws.get_all_records()
+        if market:
+            m = market.upper()
+            return [r for r in records
+                    if str(r.get("Market", "US") or "US").upper() == m]
+        return records
     except Exception as e:
         log_event("ERROR", "sheets", f"Read focus failed: {e}")
         return []
@@ -353,37 +364,46 @@ def write_config(setting: str, value: str) -> bool:
         return False
 
 
-# ----- Watchlist (stored in Config tab as comma-separated WATCHLIST) -----
+# ----- Watchlist (stored in Config tab as comma-separated rows) -----
+#
+# US watchlist lives at Setting=WATCHLIST (legacy key, unchanged for
+# backwards compat). SA watchlist lives at Setting=WATCHLIST_SA. Adding
+# a new market would mean a new key here and a thin lookup branch
+# below — no schema migration needed.
 
 WATCHLIST_KEY = "WATCHLIST"
 
 
-def read_watchlist(default: list = None) -> list:
-    """Return the user's customized watchlist, or `default` if unset.
+def _watchlist_key(market: str) -> str:
+    m = (market or "US").upper()
+    if m == "US":
+        return WATCHLIST_KEY
+    return f"{WATCHLIST_KEY}_{m}"
 
-    Stored in the Config tab as one row: Setting=WATCHLIST, Value=comma-
-    separated tickers. Empty/missing → default. Caller should pass
-    DEFAULT_WATCHLIST so bot keeps working before any /watch command.
+
+def read_watchlist(default: list = None, market: str = "US") -> list:
+    """Return the user's customized watchlist for the given market, or
+    `default` if unset. US uses the legacy WATCHLIST key; other markets
+    use WATCHLIST_<MARKET> (e.g. WATCHLIST_SA).
     """
     cfg = read_config() or {}
-    raw = (cfg.get(WATCHLIST_KEY) or "").strip()
+    raw = (cfg.get(_watchlist_key(market)) or "").strip()
     if not raw:
         return list(default or [])
     parts = [p.strip().upper() for p in raw.split(",") if p.strip()]
     return parts
 
 
-def write_watchlist(tickers: list) -> bool:
-    """Persist the watchlist (list of tickers) to the Config tab."""
+def write_watchlist(tickers: list, market: str = "US") -> bool:
+    """Persist the watchlist for the given market to the Config tab."""
     clean = [t.strip().upper() for t in tickers if t and t.strip()]
-    # Dedupe while preserving order
     seen = set()
     deduped = []
     for t in clean:
         if t not in seen:
             seen.add(t)
             deduped.append(t)
-    return write_config(WATCHLIST_KEY, ",".join(deduped))
+    return write_config(_watchlist_key(market), ",".join(deduped))
 
 
 # ----- Focus tab writers (max 3 entries, drops oldest) -----

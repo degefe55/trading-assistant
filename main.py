@@ -22,6 +22,7 @@ from core import (analyst, brief_composer, sheets, telegram_client,
                   data_router, commands, trades, scout)
 from core.logger import log_event, get_log_buffer, get_run_summary, clear_log_buffer
 from markets.us import config as us_cfg
+from markets.saudi import config as sa_cfg
 
 
 PAUSE_FILE = "/tmp/bot_paused.txt"
@@ -56,6 +57,18 @@ def main():
             run_preclose_verdict()
         elif brief_type == "eod":
             run_eod_summary()
+        # Saudi briefs (Phase F) — accept underscore (internal) and
+        # hyphen (legacy/CLI) forms. Webhook scheduler dispatches with
+        # the underscore form already; the hyphen aliases here cover
+        # GitHub Actions workflow_dispatch and any external trigger.
+        elif brief_type in ("premarket_sa", "premarket-sa"):
+            run_premarket_brief_sa()
+        elif brief_type in ("midsession_sa", "midsession-sa"):
+            run_midsession_check_sa(manual_trigger=True)
+        elif brief_type in ("preclose_sa", "preclose-sa"):
+            run_preclose_verdict_sa()
+        elif brief_type in ("eod_sa", "eod-sa"):
+            run_eod_summary_sa()
         else:
             log_event("ERROR", "main", f"Unknown BRIEF_TYPE: {brief_type}")
             return 1
@@ -383,6 +396,285 @@ def run_eod_summary():
     )
     telegram_client.send_message(message)
     log_event("INFO", "main", "EOD summary sent")
+
+
+# ===========================================================================
+# SAUDI BRIEFS (Phase F)
+# ===========================================================================
+# Mirror the US briefs above but: filter Sheet rows by Market="SA",
+# pass market="SA" through to analyze_ticker, fall back to Saudi
+# defaults for empty Focus, and pass market="SA" to the composer so it
+# can render SAR / suppress halal badges / append the SA disclaimer.
+
+def _sa_inactive() -> bool:
+    if "SA" not in ACTIVE_MARKETS:
+        log_event("INFO", "main", "Saudi market not in ACTIVE_MARKETS; skipping")
+        return True
+    return False
+
+
+def run_premarket_brief_sa():
+    """Saudi pre-market brief: positions + focus (no scouting yet)."""
+    if _sa_inactive():
+        return
+
+    analyst.reset_cancel("premarket_sa")
+
+    positions = sheets.read_positions(market="SA") or []
+    focus_rows = sheets.read_focus(market="SA") or []
+
+    # Fall back to spec defaults if user has no SA focus entries
+    focus_tickers = [f.get("Ticker") for f in focus_rows if f.get("Ticker")]
+    if not focus_tickers:
+        focus_tickers = list(sa_cfg.DEFAULT_FOCUS)
+        focus_rows = [{"Ticker": t, "Market": "SA"} for t in focus_tickers]
+
+    position_analyses = []
+    focus_analyses = []
+    cancelled = False
+    held_tickers = {p.get("Ticker") for p in positions}
+
+    try:
+        for pos in positions:
+            ticker = pos.get("Ticker")
+            if not ticker:
+                continue
+            result = analyst.analyze_ticker(ticker, "SA", "premarket_sa",
+                                            position=pos)
+            if "error" not in result:
+                position_analyses.append(result)
+
+        for f in focus_rows:
+            ticker = f.get("Ticker")
+            if not ticker or ticker in held_tickers:
+                continue
+            result = analyst.analyze_ticker(ticker, "SA", "premarket_sa")
+            if "error" not in result:
+                focus_analyses.append(result)
+    except analyst.BriefCancelled:
+        cancelled = True
+        log_event("WARN", "main",
+                  f"Saudi pre-market brief cancelled "
+                  f"({len(position_analyses)} positions, "
+                  f"{len(focus_analyses)} focus done)")
+
+    macro = data_router.get_macro(market="SA")
+    summary = get_run_summary()
+    run_cost = summary["total_cost_usd"]
+
+    if cancelled and not (position_analyses or focus_analyses):
+        telegram_client.send_message(
+            "🛑 <b>Saudi pre-market brief cancelled</b>\n"
+            f"No analyses had completed yet.\n"
+            f"💰 Run cost so far: <code>${run_cost:.4f}</code>"
+        )
+        return
+
+    message = brief_composer.compose_premarket_brief(
+        position_analyses, [], focus_analyses, [], macro, run_cost,
+        market="SA"
+    )
+    if cancelled:
+        message = ("🛑 <b>PARTIAL — Saudi brief cancelled mid-run</b>\n"
+                   "─────────────\n" + message)
+
+    keyboard = brief_composer.build_brief_keyboard(
+        position_analyses + focus_analyses
+    )
+    msg_id = telegram_client.send_message(message, inline_keyboard=keyboard)
+
+    try:
+        rec_ids = [a.get("rec_id") for a in
+                   (position_analyses + focus_analyses)
+                   if a.get("rec_id")]
+        if msg_id and rec_ids:
+            sheets.record_message_recids(msg_id, "premarket_sa", rec_ids)
+    except Exception as e:
+        log_event("WARN", "main", f"MessageMap write failed (SA): {e}")
+
+    log_event("INFO", "main",
+              "Saudi pre-market brief sent"
+              + (" (partial — cancelled)" if cancelled else ""))
+
+
+def run_midsession_check_sa(manual_trigger: bool = False):
+    """Saudi mid-session: only alert on material changes when scheduled."""
+    if _sa_inactive():
+        return
+
+    analyst.reset_cancel("midsession_sa")
+
+    positions = sheets.read_positions(market="SA") or []
+
+    material_changes = []
+    cancelled = False
+    checked = 0
+    skipped_non_material = 0
+
+    try:
+        for pos in positions:
+            ticker = pos.get("Ticker")
+            if not ticker:
+                continue
+            checked += 1
+            current = (data_router.get_price(ticker, market="SA")
+                       .get("price", 0) or 0)
+            avg = float(pos.get("AvgCost_USD", 0) or 0)
+            stop = float(pos.get("StopLoss", 0) or 0)
+            target_str = pos.get("Target")
+            target = float(target_str) if target_str else 0
+            is_material = (
+                (stop and abs(current - stop) / stop < 0.015) or
+                (target and abs(current - target) / target < 0.015) or
+                (avg and abs(current - avg) / avg > 0.03)
+            )
+            if is_material:
+                result = analyst.analyze_ticker(ticker, "SA", "midsession_sa",
+                                                position=pos)
+                if "error" not in result:
+                    material_changes.append(result)
+            else:
+                skipped_non_material += 1
+    except analyst.BriefCancelled:
+        cancelled = True
+        log_event("WARN", "main",
+                  f"Saudi mid-session cancelled "
+                  f"({len(material_changes)} alerts collected)")
+
+    log_event("INFO", "main",
+              f"Saudi mid-session: checked {checked}, "
+              f"{len(material_changes)} material, "
+              f"{skipped_non_material} non-material"
+              + (" (CANCELLED)" if cancelled else ""))
+
+    summary = get_run_summary()
+
+    if cancelled:
+        if material_changes:
+            message = brief_composer.compose_midsession_check(
+                material_changes, summary["total_cost_usd"], market="SA")
+            telegram_client.send_message(
+                "🛑 <b>PARTIAL — cancelled mid-run</b>\n"
+                "─────────────\n" + (message or "")
+            )
+        else:
+            telegram_client.send_message("🛑 <b>Saudi mid-session check cancelled</b>")
+        return
+
+    if material_changes:
+        message = brief_composer.compose_midsession_check(
+            material_changes, summary["total_cost_usd"], market="SA")
+        if message:
+            keyboard = brief_composer.build_brief_keyboard(material_changes)
+            msg_id = telegram_client.send_message(message, inline_keyboard=keyboard)
+            try:
+                rec_ids = [a.get("rec_id") for a in material_changes
+                           if a.get("rec_id")]
+                if msg_id and rec_ids:
+                    sheets.record_message_recids(msg_id, "midsession_sa", rec_ids)
+            except Exception as e:
+                log_event("WARN", "main", f"MessageMap write failed (SA): {e}")
+            log_event("INFO", "main", "Saudi mid-session alert sent")
+        return
+
+    if manual_trigger:
+        now_ksa = datetime.now(KSA_TZ)
+        confirm = (
+            f"⚪ <b>Saudi mid-session check</b>  "
+            f"<i>{now_ksa.strftime('%H:%M KSA')}</i>\n"
+            f"─────────────\n"
+            f"Checked <b>{checked}</b> position{'s' if checked != 1 else ''}, "
+            f"nothing material.\n"
+            f"<i>Stays silent on schedule unless price moves &gt;3% from "
+            f"avg cost or within 1.5% of stop/target.</i>\n"
+            f"<i>💰 ${summary['total_cost_usd']:.4f}</i>"
+        )
+        telegram_client.send_message(confirm)
+        log_event("INFO", "main",
+                  "Saudi mid-session manual: sent 'nothing material' confirmation")
+    else:
+        log_event("INFO", "main",
+                  "Saudi mid-session scheduled: silent (nothing material)")
+
+
+def run_preclose_verdict_sa():
+    """Saudi pre-close decisions: hold overnight (i.e. to next trading day) or exit."""
+    if _sa_inactive():
+        return
+
+    analyst.reset_cancel("preclose_sa")
+
+    positions = sheets.read_positions(market="SA") or []
+    analyses = []
+    cancelled = False
+
+    try:
+        for pos in positions:
+            ticker = pos.get("Ticker")
+            if not ticker:
+                continue
+            result = analyst.analyze_ticker(ticker, "SA", "preclose_sa",
+                                            position=pos)
+            if "error" not in result:
+                analyses.append(result)
+    except analyst.BriefCancelled:
+        cancelled = True
+        log_event("WARN", "main",
+                  f"Saudi pre-close cancelled "
+                  f"({len(analyses)} of {len(positions)} done)")
+
+    summary = get_run_summary()
+    if cancelled and not analyses:
+        telegram_client.send_message(
+            "🛑 <b>Saudi pre-close verdict cancelled</b>\n"
+            f"💰 Run cost: <code>${summary['total_cost_usd']:.4f}</code>"
+        )
+        return
+
+    message = brief_composer.compose_preclose_verdict(
+        analyses, summary["total_cost_usd"], market="SA")
+    if cancelled:
+        message = ("🛑 <b>PARTIAL — Saudi pre-close cancelled</b>\n"
+                   "─────────────\n" + message)
+    keyboard = brief_composer.build_brief_keyboard(analyses)
+    msg_id = telegram_client.send_message(message, inline_keyboard=keyboard)
+
+    try:
+        rec_ids = [a.get("rec_id") for a in analyses if a.get("rec_id")]
+        if msg_id and rec_ids:
+            sheets.record_message_recids(msg_id, "preclose_sa", rec_ids)
+    except Exception as e:
+        log_event("WARN", "main", f"MessageMap write failed (SA): {e}")
+
+    log_event("INFO", "main",
+              "Saudi pre-close verdict sent"
+              + (" (partial — cancelled)" if cancelled else ""))
+
+
+def run_eod_summary_sa():
+    """Saudi end-of-day summary. Reuses trades.calculate_pnl for now;
+    P&L tab tracks all trades regardless of market and the EOD composer
+    renders SAR for SA positions."""
+    if _sa_inactive():
+        return
+
+    positions = sheets.read_positions(market="SA") or []
+
+    pnl = trades.calculate_pnl()
+    trades_today = trades.get_todays_trades()
+
+    summary = get_run_summary()
+    message = brief_composer.compose_eod_summary(
+        positions,
+        pnl["realized_today_usd"],
+        pnl["unrealized_usd"],
+        pnl["realized_total_usd"],
+        trades_today,
+        summary["total_cost_usd"],
+        market="SA",
+    )
+    telegram_client.send_message(message)
+    log_event("INFO", "main", "Saudi EOD summary sent")
 
 
 def _flush_logs_to_sheet():

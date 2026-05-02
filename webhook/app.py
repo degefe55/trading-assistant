@@ -50,7 +50,7 @@ os.environ.setdefault("ACTIVE_MARKETS", "US")
 
 from core import commands, telegram_client, sheets
 from core.logger import log_event, get_log_buffer
-from config import (TELEGRAM_CHAT_ID, KSA_TZ,
+from config import (TELEGRAM_CHAT_ID, KSA_TZ, ACTIVE_MARKETS,
                     WATCHER_PRICE_INTERVAL_MIN, WATCHER_NEWS_INTERVAL_MIN)
 import main as bot_main
 
@@ -70,7 +70,19 @@ DEFAULT_TIMES = {
     "preclose":   "22:30",
     "eod":        "23:00",
 }
+# Saudi briefs (Phase F). Internal names use underscores; user-facing
+# CLI uses hyphens (premarket-sa). EOD intentionally at 15:25, five
+# minutes before US premarket at 15:30, to avoid concurrent Sonnet
+# bursts on Mon-Thu when both calendars overlap.
+DEFAULT_TIMES_SA = {
+    "premarket_sa":  "09:30",
+    "midsession_sa": "12:30",
+    "preclose_sa":   "14:30",
+    "eod_sa":        "15:25",
+}
 CONFIG_KEY_PREFIX = "BRIEF_TIME_"
+# Saudi trading weekdays (Sun-Thu): Sun=6, Mon=0, Tue=1, Wed=2, Thu=3.
+SA_TRADING_WEEKDAYS = {6, 0, 1, 2, 3}
 
 _last_runs = {}              # {brief: iso ksa timestamp of last completion}
 _last_started = {}           # {brief: iso ksa timestamp of last start}
@@ -80,7 +92,11 @@ _scheduler_lock = threading.Lock()
 
 # Per-brief running locks: prevent two of the same brief running at once.
 # Each entry is a threading.Lock acquired non-blocking before _execute_brief.
-_brief_locks = {b: threading.Lock() for b in DEFAULT_TIMES.keys()}
+# US briefs + SA briefs each get their own lock so they can run in
+# parallel where calendars overlap (Mon-Thu).
+_brief_locks = {b: threading.Lock()
+                for b in list(DEFAULT_TIMES.keys())
+                + list(DEFAULT_TIMES_SA.keys())}
 _currently_running = set()   # set of brief names currently executing
 _running_lock = threading.Lock()
 
@@ -137,68 +153,109 @@ def _check_token() -> bool:
 
 @app.route("/run/<brief_type>", methods=["POST", "GET"])
 def manual_run(brief_type: str):
-    """Spawn a brief in the background, return immediately."""
+    """Spawn a brief in the background, return immediately. Accepts both
+    underscore (premarket_sa) and hyphen (premarket-sa) forms."""
     if not RUN_TOKEN:
         return jsonify({"ok": False, "error": "RUN_TOKEN not configured"}), 503
     if not _check_token():
         return jsonify({"ok": False, "error": "invalid token"}), 401
-    if brief_type not in DEFAULT_TIMES:
-        return jsonify({"ok": False, "error": f"unknown brief: {brief_type}"}), 400
 
-    spawned, reason = _spawn_brief(brief_type, source="http")
+    # Normalize: hyphens (user-facing) → underscores (internal)
+    internal = brief_type.lower().strip().replace("-", "_")
+    valid = set(DEFAULT_TIMES.keys()) | set(DEFAULT_TIMES_SA.keys())
+    if internal not in valid:
+        return jsonify({"ok": False,
+                        "error": f"unknown brief: {brief_type}"}), 400
+
+    spawned, reason = _spawn_brief(internal, source="http")
     if spawned:
-        return jsonify({"ok": True, "spawned": brief_type}), 202
-    return jsonify({"ok": False, "error": reason, "brief": brief_type}), 409
+        return jsonify({"ok": True, "spawned": internal}), 202
+    return jsonify({"ok": False, "error": reason, "brief": internal}), 409
 
 
 @app.route("/run/watcher_price", methods=["POST", "GET"])
 def manual_run_watcher_price():
-    return manual_run_watcher("price")
+    return manual_run_watcher_market("price", "US")
 
 
 @app.route("/run/watcher_news", methods=["POST", "GET"])
 def manual_run_watcher_news():
-    return manual_run_watcher("news")
+    return manual_run_watcher_market("news", "US")
 
 
-@app.route("/run/watcher/<mode>", methods=["POST", "GET"])
-def manual_run_watcher(mode: str):
-    """Manually fire one watcher tick. Same skip-if-busy semantics as
-    the scheduled job — if the lock is held, returns 409."""
+@app.route("/run/watcher_price_sa", methods=["POST", "GET"])
+def manual_run_watcher_price_sa():
+    return manual_run_watcher_market("price", "SA")
+
+
+@app.route("/run/watcher_news_sa", methods=["POST", "GET"])
+def manual_run_watcher_news_sa():
+    return manual_run_watcher_market("news", "SA")
+
+
+@app.route("/run/watcher/<market>/<mode>", methods=["POST", "GET"])
+def manual_run_watcher_path(market: str, mode: str):
+    return manual_run_watcher_market(mode, market.upper())
+
+
+def manual_run_watcher_market(mode: str, market: str = "US"):
+    """Manually fire one watcher tick for the given market. Same
+    skip-if-busy semantics as the scheduled job — if the lock is held,
+    returns 409."""
     if not RUN_TOKEN:
         return jsonify({"ok": False, "error": "RUN_TOKEN not configured"}), 503
     if not _check_token():
         return jsonify({"ok": False, "error": "invalid token"}), 401
     if mode not in ("price", "news"):
         return jsonify({"ok": False, "error": f"unknown mode: {mode}"}), 400
+    if market not in ("US", "SA"):
+        return jsonify({"ok": False, "error": f"unknown market: {market}"}), 400
 
-    spawned, reason = _spawn_watcher_tick(mode, source="http")
+    spawned, reason = _spawn_watcher_tick(mode, source="http", market=market)
     if spawned:
-        return jsonify({"ok": True, "spawned": f"watcher_{mode}"}), 202
+        return jsonify({"ok": True,
+                        "spawned": f"watcher_{market.lower()}_{mode}"}), 202
     return jsonify({"ok": False, "error": reason,
-                    "mode": mode}), 409
+                    "mode": mode, "market": market}), 409
 
 
 @app.route("/cancel/watcher", methods=["POST", "GET"])
 def cancel_watcher_endpoint():
-    """Request cancellation of an in-flight watcher run. Cooperative:
-    in-flight Sonnet finishes; further tickers are skipped."""
+    return _cancel_watcher_for("US")
+
+
+@app.route("/cancel/watcher_sa", methods=["POST", "GET"])
+def cancel_watcher_sa_endpoint():
+    return _cancel_watcher_for("SA")
+
+
+def _cancel_watcher_for(market: str):
+    """Request cancellation of an in-flight watcher run for the given
+    market. Cooperative: in-flight Sonnet finishes; further tickers
+    are skipped."""
     if not RUN_TOKEN:
         return jsonify({"ok": False, "error": "RUN_TOKEN not configured"}), 503
     if not _check_token():
         return jsonify({"ok": False, "error": "invalid token"}), 401
 
-    if _watcher_lock.acquire(blocking=False):
-        # Lock was free → nothing running
-        _watcher_lock.release()
-        return jsonify({"ok": False, "error": "not running"}), 409
+    cancel_key = "watcher_sa" if market == "SA" else "watcher"
+    market_l = market.lower()
+    expected_keys = (f"watcher_{market_l}_price", f"watcher_{market_l}_news")
+
+    with _running_lock:
+        is_running = any(k in _currently_running for k in expected_keys)
+
+    if not is_running:
+        return jsonify({"ok": False, "error": "not running",
+                        "market": market}), 409
 
     from core import analyst as analyst_mod
-    flag_was_new = analyst_mod.request_cancel("watcher")
+    flag_was_new = analyst_mod.request_cancel(cancel_key)
     log_event("INFO", "watcher",
-              f"Cancellation requested for watcher via HTTP "
+              f"Cancellation requested for {cancel_key} via HTTP "
               f"(new={flag_was_new})")
-    return jsonify({"ok": True, "was_already_pending": not flag_was_new}), 202
+    return jsonify({"ok": True, "market": market,
+                    "was_already_pending": not flag_was_new}), 202
 
 
 @app.route("/reschedule", methods=["POST", "GET"])
@@ -214,30 +271,34 @@ def reschedule_endpoint():
 @app.route("/cancel/<brief_type>", methods=["POST", "GET"])
 def cancel_endpoint(brief_type: str):
     """Request cancellation of a running brief. Cooperative: the in-flight
-    Claude call finishes; subsequent tickers are skipped."""
+    Claude call finishes; subsequent tickers are skipped. Accepts both
+    underscore and hyphen forms (premarket_sa or premarket-sa)."""
     if not RUN_TOKEN:
         return jsonify({"ok": False, "error": "RUN_TOKEN not configured"}), 503
     if not _check_token():
         return jsonify({"ok": False, "error": "invalid token"}), 401
-    if brief_type not in DEFAULT_TIMES:
-        return jsonify({"ok": False, "error": f"unknown brief: {brief_type}"}), 400
+
+    internal = brief_type.lower().strip().replace("-", "_")
+    valid = set(DEFAULT_TIMES.keys()) | set(DEFAULT_TIMES_SA.keys())
+    if internal not in valid:
+        return jsonify({"ok": False,
+                        "error": f"unknown brief: {brief_type}"}), 400
 
     with _running_lock:
-        is_running = brief_type in _currently_running
+        is_running = internal in _currently_running
 
     if not is_running:
         return jsonify({"ok": False, "error": "not running",
-                        "brief": brief_type}), 409
+                        "brief": internal}), 409
 
-    # Lazy import: analyst is part of the bot package, not the webhook
     from core import analyst as analyst_mod
-    flag_was_new = analyst_mod.request_cancel(brief_type)
+    flag_was_new = analyst_mod.request_cancel(internal)
     log_event("INFO", "scheduler",
-              f"Cancellation requested for {brief_type} via HTTP "
+              f"Cancellation requested for {internal} via HTTP "
               f"(new={flag_was_new})")
     return jsonify({
         "ok": True,
-        "brief": brief_type,
+        "brief": internal,
         "was_already_pending": not flag_was_new,
     }), 202
 
@@ -571,6 +632,17 @@ def _execute_brief(brief_type: str, source: str = "schedule"):
             bot_main.run_preclose_verdict()
         elif brief_type == "eod":
             bot_main.run_eod_summary()
+        # Saudi briefs (Phase F) — gated inside the bot_main functions
+        # on "SA" in ACTIVE_MARKETS, so safe to call even when SA is
+        # dormant (silent no-op).
+        elif brief_type == "premarket_sa":
+            bot_main.run_premarket_brief_sa()
+        elif brief_type == "midsession_sa":
+            bot_main.run_midsession_check_sa(manual_trigger=manual)
+        elif brief_type == "preclose_sa":
+            bot_main.run_preclose_verdict_sa()
+        elif brief_type == "eod_sa":
+            bot_main.run_eod_summary_sa()
         else:
             log_event("ERROR", "scheduler", f"Unknown brief: {brief_type}")
             return
@@ -610,48 +682,71 @@ def _scheduled_runner(brief_type: str):
     _spawn_brief(brief_type, source="schedule")
 
 
+def _scheduled_runner_sa(brief_type: str):
+    """Cron entry point for Saudi briefs. Sun-Thu gate + ACTIVE_MARKETS
+    gate. The brief function in main.py re-checks 'SA' in ACTIVE_MARKETS
+    and silent-no-ops if absent — defense in depth."""
+    if datetime.now(KSA_TZ).weekday() not in SA_TRADING_WEEKDAYS:
+        log_event("INFO", "scheduler",
+                  f"Skipping {brief_type}: not a Saudi trading day")
+        return
+    if "SA" not in ACTIVE_MARKETS:
+        log_event("INFO", "scheduler",
+                  f"Skipping {brief_type}: SA not in ACTIVE_MARKETS")
+        return
+    _spawn_brief(brief_type, source="schedule")
+
+
 # ---------------------------------------------------------------------------
 # Watcher tick scheduling
 # ---------------------------------------------------------------------------
 
-def _spawn_watcher_tick(mode: str, source: str) -> tuple:
+def _spawn_watcher_tick(mode: str, source: str,
+                        market: str = "US") -> tuple:
     """Try to acquire the shared watcher lock and run one tick in a
-    background thread. If the lock is already held, log "tick skipped"
-    and return False — DO NOT QUEUE.
+    background thread. The lock is shared across (US price, US news,
+    SA price, SA news) ticks per Q12 — SA and US never temporally
+    overlap (SA closes 15:00 KSA, US opens 16:30 KSA).
 
-    Returns (spawned: bool, reason: str).
-    """
+    If the lock is held, log 'tick skipped' and return False — DO NOT
+    QUEUE. Returns (spawned: bool, reason: str)."""
     if mode not in ("price", "news"):
         return False, f"unknown mode: {mode}"
+    if market not in ("US", "SA"):
+        return False, f"unknown market: {market}"
+
+    log_tag = f"{market.lower()}/{mode}"
 
     if not _watcher_lock.acquire(blocking=False):
-        # The shared lock means a previous price OR news tick is still
-        # running. Per spec: skip this tick, log it, do not queue.
         log_event("INFO", "watcher",
-                  f"watcher tick skipped (mode={mode}, source={source}): "
+                  f"watcher tick skipped ({log_tag}, source={source}): "
                   f"lock held")
         return False, "lock held"
 
+    run_key = f"watcher_{market.lower()}_{mode}"
+    state_key = f"{market.lower()}_{mode}"  # "us_price", "sa_news", etc.
+
     with _running_lock:
-        _currently_running.add(f"watcher_{mode}")
-    _last_watcher_started[mode] = datetime.now(KSA_TZ).isoformat()
+        _currently_running.add(run_key)
+    _last_watcher_started[state_key] = datetime.now(KSA_TZ).isoformat()
 
     def _runner():
         try:
             from core import watcher
             try:
-                watcher.run_watcher_check(mode)
+                watcher.run_watcher_check(mode, market=market)
             except Exception as e:
-                err = f"watcher tick crashed (mode={mode}): {e}\n{traceback.format_exc()}"
+                err = (f"watcher tick crashed ({log_tag}): {e}\n"
+                       f"{traceback.format_exc()}")
                 log_event("ERROR", "watcher", err)
                 try:
                     telegram_client.send_error_alert(err[:1500])
                 except Exception:
                     pass
-            _last_watcher_runs[mode] = datetime.now(KSA_TZ).isoformat()
+            _last_watcher_runs[state_key] = datetime.now(KSA_TZ).isoformat()
         finally:
             with _running_lock:
-                _currently_running.discard(f"watcher_{mode}")
+                _currently_running.discard(run_key)
             _watcher_lock.release()
             try:
                 buf = get_log_buffer()
@@ -661,18 +756,32 @@ def _spawn_watcher_tick(mode: str, source: str) -> tuple:
                 print(f"watcher log flush failed: {e}", file=sys.stderr)
 
     t = threading.Thread(target=_runner, daemon=True,
-                         name=f"watcher-{mode}")
+                         name=f"watcher-{market.lower()}-{mode}")
     t.start()
     return True, "spawned"
 
 
 def _scheduled_watcher_runner(mode: str):
-    """Cron entry point — gate at the boundary, then spawn."""
+    """Cron entry point for US watcher — Mon-Fri gate, then spawn."""
     if not _is_weekday_ksa():
         log_event("INFO", "watcher",
-                  f"watcher tick skipped (mode={mode}): weekend in KSA")
+                  f"watcher tick skipped (us/{mode}): weekend in KSA")
         return
-    _spawn_watcher_tick(mode, source="schedule")
+    _spawn_watcher_tick(mode, source="schedule", market="US")
+
+
+def _scheduled_watcher_runner_sa(mode: str):
+    """Cron entry point for Saudi watcher — Sun-Thu gate, ACTIVE_MARKETS
+    gate, then spawn. The watcher itself re-checks market hours."""
+    if datetime.now(KSA_TZ).weekday() not in SA_TRADING_WEEKDAYS:
+        log_event("INFO", "watcher",
+                  f"watcher tick skipped (sa/{mode}): not a Saudi weekday")
+        return
+    if "SA" not in ACTIVE_MARKETS:
+        log_event("INFO", "watcher",
+                  f"watcher tick skipped (sa/{mode}): SA not active")
+        return
+    _spawn_watcher_tick(mode, source="schedule", market="SA")
 
 
 def _self_ping():
@@ -763,7 +872,8 @@ def rebuild_schedule():
     global _active_times, _active_watcher_intervals
     with _scheduler_lock:
         schedule.clear()
-        # Brief jobs (existing)
+
+        # US briefs (existing)
         times = _load_times_from_config()
         for brief, hhmm in times.items():
             schedule.every().day.at(hhmm, KSA_TZ_STR).do(
@@ -771,12 +881,20 @@ def rebuild_schedule():
             ).tag(brief)
         _active_times = times
 
-        # Watcher jobs (Phase D.5). Two scheduled jobs as the spec
-        # requires; both share _watcher_lock so they can never overlap
-        # — on collision the later one logs "tick skipped" and exits.
-        # The market-hours / pause / enabled gates live inside
-        # watcher.run_watcher_check, not here, so the schedule itself
-        # stays simple and the gating decisions are observable in Logs.
+        # Saudi briefs (Phase F). Times are hardcoded in DEFAULT_TIMES_SA
+        # — they're not configurable via the Config tab today; can be
+        # added later with a CONFIG_KEY_PREFIX_SA if needed. Jobs are
+        # always registered; the runner gates on Sun-Thu + ACTIVE_MARKETS.
+        for brief, hhmm in DEFAULT_TIMES_SA.items():
+            schedule.every().day.at(hhmm, KSA_TZ_STR).do(
+                _scheduled_runner_sa, brief
+            ).tag(brief)
+
+        # Watcher jobs (Phase D.5 + Phase F). Two US ticks + two SA
+        # ticks. All share _watcher_lock — on collision the later one
+        # logs and exits. SA and US never temporally overlap (SA closes
+        # 15:00 KSA, US opens 16:30) so the shared lock is conflict-free
+        # in practice.
         intervals = _load_watcher_intervals_from_config()
         schedule.every(intervals["price"]).minutes.do(
             _scheduled_watcher_runner, "price"
@@ -784,11 +902,17 @@ def rebuild_schedule():
         schedule.every(intervals["news"]).minutes.do(
             _scheduled_watcher_runner, "news"
         ).tag("watcher_news")
+        schedule.every(intervals["price"]).minutes.do(
+            _scheduled_watcher_runner_sa, "price"
+        ).tag("watcher_sa_price")
+        schedule.every(intervals["news"]).minutes.do(
+            _scheduled_watcher_runner_sa, "news"
+        ).tag("watcher_sa_news")
         _active_watcher_intervals = intervals
 
         log_event("INFO", "scheduler",
-                  f"Rebuilt schedule: briefs={times}, "
-                  f"watcher={intervals}")
+                  f"Rebuilt schedule: us_briefs={times}, "
+                  f"sa_briefs={DEFAULT_TIMES_SA}, watcher={intervals}")
 
 
 def start_scheduler():

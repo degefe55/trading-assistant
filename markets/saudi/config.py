@@ -1,58 +1,57 @@
 """
-Saudi (Tadawul) market configuration.
-DORMANT MODULE - structure ready, data source not yet connected.
-When ready to activate: add data source in data_source.py and
-add "SAUDI" to ACTIVE_MARKETS env var.
+Saudi (Tadawul) market configuration — Phase F.
+
+Activated by adding "SA" to the ACTIVE_MARKETS env var. Without that,
+all Saudi briefs and watcher ticks are scheduled but no-op silently
+(the gate lives in webhook/app.py and the brief functions in main.py).
 """
 from datetime import time
 
-MARKET_CODE = "SAUDI"
+MARKET_CODE = "SA"
 MARKET_NAME = "Saudi Arabia (Tadawul)"
 CURRENCY = "SAR"
-ENABLED = False  # flip to True when data source connected
 
-# Tadawul hours in KSA local time (KSA = local, so no tz math needed)
+# Tadawul hours in KSA local time (KSA has no DST, no tz math required)
 OPEN_TIME_KSA = time(10, 0)    # 10:00 AM
 CLOSE_TIME_KSA = time(15, 0)   # 3:00 PM
 
-# Saudi weekend is Fri-Sat, trading Sun-Thu
-TRADING_DAYS = [6, 0, 1, 2, 3]  # Sun=6, Mon=0, ..., Thu=3
+# Saudi weekend is Fri-Sat. Trading days: Sun-Thu.
+# Python weekday(): Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6.
+TRADING_DAYS = [6, 0, 1, 2, 3]
 
-# Bot schedule for Saudi (different from US)
+# Bot schedule for Saudi (KSA times). EOD intentionally offset to 15:25
+# (5 minutes before US premarket at 15:30) so the two markets do NOT
+# fire concurrent Sonnet bursts on Mon-Thu when their calendars overlap.
 SCHEDULE = {
-    "premarket_brief": time(9, 30),
-    "midsession_check": time(12, 30),
-    "preclose_verdict": time(14, 30),
-    "eod_summary": time(15, 15),
+    "premarket_sa":  time(9, 30),
+    "midsession_sa": time(12, 30),
+    "preclose_sa":   time(14, 30),
+    "eod_sa":        time(15, 25),
 }
 
-# Known halal-compliant Saudi tickers (most Saudi stocks are compliant by default,
-# but some are explicitly excluded - banks, conventional insurance)
-HALAL_APPROVED = {
-    # Energy / Petrochemicals (most are halal)
-    "2222",  # Aramco
-    "2010",  # SABIC
-    "2020",  # SABIC Agri-Nutrients
-    # Telecom
-    "7010",  # STC
-    "7020",  # Etihad Etisalat (Mobily)
-    "7030",  # Zain KSA
-    # Retail / Consumer
-    "4001",  # Almarai
-    "4013",  # Sulaiman Al Habib
-    "4190",  # Jarir
-    # Islamic banks (compliant)
-    "1120",  # Al Rajhi Bank
-    "1111",  # Saudi National Bank (partially compliant)
-    "1180",  # Al Rajhi Capital
-    # Materials
-    "1211",  # Maaden
-}
+# Halal screening is intentionally NOT applied for the Saudi market.
+# Tadawul-listed equities are screened at the exchange level for
+# compliance with KSA frameworks; brief alerts include a footer
+# reminding the user to verify compliance themselves.
+# See DEPLOY notes for the rationale.
+HALAL_SCREENING_ENABLED = False
+HALAL_APPROVED = set()  # intentionally empty — see comment above
 
-HALAL_EXCLUDED_SECTORS = {
-    "Conventional Banking", "Conventional Insurance",
-    "Gambling", "Alcohol", "Tobacco",
-}
+# Initial focus tickers (Tadawul codes). User can add/remove via
+# /focus and /unfocus once activated. These act as defaults when the
+# Focus tab has no SA entries.
+DEFAULT_FOCUS = ["2222", "7010", "1120"]   # Aramco, STC, Al Rajhi Bank
 
-DEFAULT_WATCHLIST = []  # add when activating
-MACRO_INDICATORS = ["TASI", "NOMUC"]  # Saudi indexes
+# Watchlist defaults — start empty; user adds via /watch.
+DEFAULT_WATCHLIST = []
+
+# Macro indicators. Saudi macro source not yet wired; data_router
+# returns empty dict for SA macro and the analyst handles "macro
+# unavailable" gracefully.
+MACRO_INDICATORS = ["TASI", "NOMUC"]
+
+# Marketaux ticker symbol suffix for Saudi entities. Tweak here if
+# Marketaux's Tadawul convention turns out to be different (e.g. ".SAU"
+# or no suffix). The data_router applies this suffix when querying
+# news for SA tickers.
+MARKETAUX_SYMBOL_SUFFIX = ".SR"
