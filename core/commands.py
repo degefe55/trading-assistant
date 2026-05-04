@@ -37,9 +37,11 @@ def _normalize_brief_arg(s: str) -> str:
 
 def _detect_market(ticker: str) -> str | None:
     """Detect market from ticker shape.
-      - all-digit (1-4 chars)            → 'SA'  (Tadawul codes)
-      - all-letters or letters+./- (1-6) → 'US'  (NYSE/Nasdaq tickers)
-      - anything else                    → None  (ambiguous; ask user)
+      - all-digit (1-4 chars)                    → 'SA'  (Tadawul codes)
+      - alphanumeric + ./- (1-6, has a letter)   → 'US'  (NYSE/Nasdaq;
+                                                    incl. mixed like
+                                                    US500, BRK.B)
+      - anything else                            → None  (ambiguous)
     """
     if not ticker:
         return None
@@ -50,7 +52,7 @@ def _detect_market(ticker: str) -> str | None:
         if 1 <= len(t) <= 4:
             return "SA"
         return None
-    if all(c.isalpha() or c in (".", "-") for c in t):
+    if all(c.isalnum() or c in (".", "-") for c in t):
         if 1 <= len(t) <= 6:
             return "US"
         return None
@@ -568,11 +570,13 @@ def _validate_ticker_format(t: str) -> bool:
     """Cheap pre-filter for obviously-invalid ticker input.
 
     Accepts:
-      - US: 1-6 chars, letters + . or - (e.g. AAPL, BRK.B)
+      - US: 1-6 chars, letters/digits + . or - (e.g. AAPL, BRK.B, US500)
       - SA: 1-4 digits (Tadawul codes, e.g. 2222)
     Real existence is checked by _verify_ticker_exists() (US only —
     SAHMK doesn't have a free 'exists?' endpoint, so SA tickers are
-    accepted on shape alone).
+    accepted on shape alone). Alphanumeric tickers like US500 pass
+    the format gate here and Twelve Data is the source of truth for
+    whether the symbol actually trades.
     """
     if not t:
         return False
@@ -583,7 +587,7 @@ def _validate_ticker_format(t: str) -> bool:
         # Saudi (Tadawul) codes are 4 digits today; allow 1-4 to be
         # safe in case of future suffixes like rights issues.
         return 1 <= len(t) <= 4
-    return all(c.isalpha() or c in (".", "-") for c in t)
+    return all(c.isalnum() or c in (".", "-") for c in t)
 
 
 def _verify_ticker_exists(ticker: str) -> dict:

@@ -169,7 +169,14 @@ def _validate_output(text: str, expected_ticker: str) -> str:
                      "AT", "BY", "FOR", "IN", "OF", "ON", "TO", "UP",
                      "US", "WE", "BE", "DO", "GO", "IS", "IT", "MY",
                      "NO", "SO", "AM", "AN", "PM", "AI", "OK", "HOLD",
-                     "BUY", "SELL", "WAIT", "STOP", "TARGET", "RISK"}
+                     "BUY", "SELL", "WAIT", "STOP", "TARGET", "RISK",
+                     # TA / fundamentals abbreviations — when the prompt
+                     # allows trading reasoning the model may mention
+                     # these multiple times; without these in stopwords
+                     # the response gets false-flagged as 'other ticker'.
+                     "RSI", "MACD", "EMA", "SMA", "ATR", "VWAP",
+                     "OBV", "ADX", "IV",
+                     "EPS", "ROI", "ROE", "FCF", "ETF", "IPO"}
         candidates = re.findall(r"\b([A-Z]{2,5})\b", t)
         bad = [c for c in candidates
                if c != expected_ticker and c not in STOPWORDS]

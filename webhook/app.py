@@ -543,10 +543,20 @@ def _send_deep_dive(rec_id: str, parent_msg_id):
         f"or <code>/ask {rec_id} ...</code></i>"
     )
 
-    telegram_client.send_message(
+    panel_msg_id = telegram_client.send_message(
         "\n".join(lines),
         reply_to_message_id=parent_msg_id,
     )
+    # Map the panel's own message_id so threaded replies on the deep
+    # dive land back on this rec. Without this, replies to the panel
+    # fall through to "I don't have context for that message" because
+    # only the original brief was tracked in MessageMap.
+    if panel_msg_id:
+        try:
+            sheets.record_message_recids(panel_msg_id, "deepdive", [rec_id])
+        except Exception as e:
+            log_event("WARN", "webhook",
+                      f"MessageMap write failed for deepdive panel: {e}")
     log_event("INFO", "webhook", f"Sent deep dive for {rec_id}")
     return jsonify({"ok": True, "rec_id": rec_id}), 200
 
