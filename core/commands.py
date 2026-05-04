@@ -301,6 +301,7 @@ def _cmd_status() -> str:
     lines.append("─────────────")
     lines.append(f"Time (KSA): {datetime.now(KSA_TZ).strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"Scheduled briefs: {'⏸️ PAUSED' if paused else '✅ active'}")
+    lines.append(f"Active markets: {', '.join(ACTIVE_MARKETS) or '—'}")
     lines.append(f"Mock mode: {'ON' if os.getenv('MOCK_MODE', 'true') == 'true' else 'OFF'}")
     positions = sheets.read_positions()
     lines.append(f"Open positions: {len(positions)}")
@@ -419,6 +420,10 @@ def _cmd_run(args: list) -> str:
         # spawn function.
         return (f"❌ Unknown brief: <code>{args[0]}</code>\n"
                 f"Send /runlist to see options.")
+
+    if brief.endswith("_sa") and "SA" not in ACTIVE_MARKETS:
+        return ("⏸ <b>SA market not active in ACTIVE_MARKETS</b> — "
+                "set it to <code>US,SA</code> on Railway to enable.")
 
     try:
         from webhook import app as webhook_app

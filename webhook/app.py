@@ -561,7 +561,7 @@ def _spawn_brief(brief_type: str, source: str) -> tuple:
     Spawn is REJECTED if the same brief is already running. Different briefs
     can run in parallel.
     """
-    if brief_type not in DEFAULT_TIMES:
+    if brief_type not in DEFAULT_TIMES and brief_type not in DEFAULT_TIMES_SA:
         return False, f"unknown brief: {brief_type}"
 
     lock = _brief_locks[brief_type]
