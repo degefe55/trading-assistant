@@ -117,3 +117,6 @@ GOOGLE_SA_JSON = os.getenv("GOOGLE_SA_JSON", "")
 # Free tier: 100 requests/day, 15-min delayed prices.
 SAHMK_API_KEY = os.getenv("SAHMK_API_KEY", "")
 SAHMK_BASE_URL = "https://app.sahmk.sa/api/v1"
+# Polygon.io — US intraday aggregates provider (Phase G prep).
+# Stocks Starter plan: real-time bars on /v2/aggs/ticker.
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
