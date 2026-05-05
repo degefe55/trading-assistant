@@ -70,10 +70,18 @@ SCHEMAS = {
                         "OneLinePlan", "PriceAtCall", "ActionPrice",
                         "StopLoss", "Target", "RiskScore", "HalalAI",
                         "NewsCount", "TopNewsHeadline", "Reasoning",
-                        "RawJSON"],
+                        "RawJSON", "Source"],
     "MessageMap": ["MessageID", "Date", "Time_KSA", "BriefType", "RecIDs"],
     "WatcherCooldown": ["Ticker", "Date", "AlertCount"],
     "Config": ["Setting", "Value", "Description"],
+    # Phase G.2 — option-method state machine. One row per signal,
+    # upserted as the signal moves PRE_SIGNAL → TRACKING → DONE.
+    "MethodSignals": ["SignalID", "Date", "Time_KSA", "Direction", "State",
+                      "TriggerPrice", "StopPrice", "TP1", "TP2", "TP3",
+                      "TP1Hit", "TP2Hit", "TP3Hit", "InvalidatedAt",
+                      "StateUpdatedAt", "Source"],
+    "MethodCooldown": ["Date", "Direction", "LastPreSignalAt",
+                       "LastEntryAt", "SetupCount"],
 }
 
 DEFAULT_CONFIG_ROWS = [
@@ -328,6 +336,7 @@ def append_recommendation(rec: dict) -> str:
             first_headline,
             (deep.get("reasoning", "") or "")[:1000],
             raw_json,
+            rec.get("source", ""),
         ])
         log_event("INFO", "sheets",
                   f"Logged recommendation {rec_id}: "
@@ -660,3 +669,245 @@ def get_recids_for_message(message_id: int) -> list:
         log_event("WARN", "sheets",
                   f"get_recids_for_message({message_id}) failed: {e}")
         return []
+
+
+# ============================================================
+# METHOD SIGNALS + COOLDOWN (Phase G.2)
+# ============================================================
+# One row per signal lifecycle in MethodSignals. State transitions
+# (PRE_SIGNAL → TRACKING → DONE) upsert by SignalID. MethodCooldown
+# is one row per (Date, Direction) tracking last timestamps and the
+# setup count for daily-cap enforcement.
+#
+# Same single-process / single-tick-lock guarantees as
+# WatcherCooldown — read-modify-write is acceptable because the
+# webhook scheduler serializes method ticks via _method_lock.
+
+def _col_letter(idx: int) -> str:
+    """1-indexed column number → A1 letter (A, B, ..., Z, AA, ...)."""
+    s = ""
+    n = idx
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        s = chr(65 + rem) + s
+    return s
+
+
+def read_method_state(signal_id: str) -> dict:
+    """Return the MethodSignals row for `signal_id` as a dict, or {}."""
+    ss = _get_spreadsheet()
+    if ss is None or not signal_id:
+        return {}
+    try:
+        ws = ss.worksheet("MethodSignals")
+        records = ws.get_all_records()
+        for r in records:
+            if str(r.get("SignalID", "")).strip() == signal_id:
+                return dict(r)
+        return {}
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"read_method_state({signal_id}) failed: {e}")
+        return {}
+
+
+def write_method_state(signal_id: str, state: dict) -> bool:
+    """Upsert a MethodSignals row keyed by SignalID. `state` keys map
+    to the schema headers; missing keys are written as empty cells."""
+    ss = _get_spreadsheet()
+    if ss is None or not signal_id:
+        return False
+    headers = SCHEMAS["MethodSignals"]
+    row = [state.get(h, "") for h in headers]
+    # Make sure SignalID is correct even if caller forgot it
+    row[0] = signal_id
+    try:
+        ws = ss.worksheet("MethodSignals")
+        cell = None
+        try:
+            cell = ws.find(signal_id, in_column=1)
+        except Exception:
+            cell = None
+        if cell is not None:
+            end_col = _col_letter(len(headers))
+            ws.update(values=[row],
+                      range_name=f"A{cell.row}:{end_col}{cell.row}")
+        else:
+            ws.append_row(row)
+        return True
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"write_method_state({signal_id}) failed: {e}")
+        return False
+
+
+def read_active_method_signals() -> list:
+    """All MethodSignals rows in PRE_SIGNAL or TRACKING state.
+
+    Used by the runner on startup to rehydrate the in-memory tracker
+    so a Railway restart mid-trade keeps tracking the same signal
+    (instead of forgetting it and emitting a fresh PRE_SIGNAL when the
+    setup is still alive).
+    """
+    ss = _get_spreadsheet()
+    if ss is None:
+        return []
+    try:
+        ws = ss.worksheet("MethodSignals")
+        records = ws.get_all_records()
+        return [dict(r) for r in records
+                if str(r.get("State", "")).strip().upper()
+                in ("PRE_SIGNAL", "TRACKING")]
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"read_active_method_signals failed: {e}")
+        return []
+
+
+def read_method_signals(limit: int = 10) -> list:
+    """Most-recent-first list of MethodSignals rows. Used by
+    /method history."""
+    ss = _get_spreadsheet()
+    if ss is None or limit <= 0:
+        return []
+    try:
+        ws = ss.worksheet("MethodSignals")
+        records = ws.get_all_records()
+        # Rows are append-ordered — newest is at the end. Reverse to
+        # get most-recent first.
+        return list(reversed(records))[:limit]
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"read_method_signals failed: {e}")
+        return []
+
+
+def read_method_cooldown(date_str: str, direction: str) -> dict:
+    """Return the cooldown row for (date_str, direction), or {}."""
+    ss = _get_spreadsheet()
+    if ss is None or not date_str or not direction:
+        return {}
+    direction = direction.lower().strip()
+    try:
+        ws = ss.worksheet("MethodCooldown")
+        records = ws.get_all_records()
+        for r in records:
+            if (str(r.get("Date", "")).strip() == date_str
+                    and str(r.get("Direction", "")).strip().lower()
+                    == direction):
+                return dict(r)
+        return {}
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"read_method_cooldown({date_str},{direction}) failed: {e}")
+        return {}
+
+
+def bump_method_cooldown(date_str: str, direction: str,
+                         field: str) -> bool:
+    """Update one field on the (date_str, direction) cooldown row,
+    inserting the row if missing.
+
+    Behavior by field:
+      - LastPreSignalAt / LastEntryAt → set to now (KSA HH:MM:SS).
+      - SetupCount → increment by 1.
+
+    Returns True on success, False otherwise. Caller may need to call
+    twice (e.g. on PRE_SIGNAL: bump LastPreSignalAt and SetupCount).
+    """
+    ss = _get_spreadsheet()
+    if ss is None or not date_str or not direction:
+        return False
+    direction = direction.lower().strip()
+    if field not in ("LastPreSignalAt", "LastEntryAt", "SetupCount"):
+        log_event("WARN", "sheets",
+                  f"bump_method_cooldown unknown field: {field}")
+        return False
+    try:
+        ws = ss.worksheet("MethodCooldown")
+        records = ws.get_all_records()
+        headers = SCHEMAS["MethodCooldown"]
+        # Find row index in sheet (records start at row 2)
+        target_idx = None
+        target_row = None
+        for idx, r in enumerate(records, start=2):
+            if (str(r.get("Date", "")).strip() == date_str
+                    and str(r.get("Direction", "")).strip().lower()
+                    == direction):
+                target_idx = idx
+                target_row = r
+                break
+
+        now_str = datetime.now(KSA_TZ).strftime("%H:%M:%S")
+        if field == "SetupCount":
+            new_val = int(target_row.get("SetupCount", 0) or 0) + 1 \
+                if target_row else 1
+        else:
+            new_val = now_str
+
+        if target_idx is None:
+            # Insert: build row with this field set, others empty (or 1
+            # for SetupCount on insert).
+            blank = {h: "" for h in headers}
+            blank["Date"] = date_str
+            blank["Direction"] = direction
+            blank[field] = new_val
+            if field != "SetupCount":
+                blank["SetupCount"] = 0
+            ws.append_row([blank[h] for h in headers])
+            return True
+
+        col = headers.index(field) + 1
+        ws.update_cell(target_idx, col, new_val)
+        return True
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"bump_method_cooldown({date_str},{direction},"
+                  f"{field}) failed: {e}")
+        return False
+
+
+def reset_method_cooldown(date_str: str = None) -> bool:
+    """Wipe all rows in MethodCooldown (date_str=None) or just rows for
+    a specific date. Used by /method reset."""
+    ss = _get_spreadsheet()
+    if ss is None:
+        return False
+    try:
+        ws = ss.worksheet("MethodCooldown")
+        records = ws.get_all_records()
+        # Walk from the bottom so deletions don't shift remaining indices
+        for idx in range(len(records) + 1, 1, -1):
+            r = records[idx - 2]
+            if date_str is None or str(r.get("Date", "")).strip() == date_str:
+                ws.delete_rows(idx)
+        return True
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"reset_method_cooldown({date_str}) failed: {e}")
+        return False
+
+
+def reset_method_signals_active() -> bool:
+    """Force-DONE all rows currently in PRE_SIGNAL or TRACKING. Used by
+    /method reset to clear in-flight state without losing history."""
+    ss = _get_spreadsheet()
+    if ss is None:
+        return False
+    try:
+        ws = ss.worksheet("MethodSignals")
+        records = ws.get_all_records()
+        headers = SCHEMAS["MethodSignals"]
+        state_col = headers.index("State") + 1
+        updated_col = headers.index("StateUpdatedAt") + 1
+        now_str = datetime.now(KSA_TZ).strftime("%H:%M:%S")
+        for idx, r in enumerate(records, start=2):
+            if str(r.get("State", "")).strip().upper() in ("PRE_SIGNAL",
+                                                           "TRACKING"):
+                ws.update_cell(idx, state_col, "DONE")
+                ws.update_cell(idx, updated_col, now_str)
+        return True
+    except Exception as e:
+        log_event("WARN", "sheets",
+                  f"reset_method_signals_active failed: {e}")
+        return False

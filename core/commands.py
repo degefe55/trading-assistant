@@ -26,6 +26,10 @@ VALID_BRIEFS = (
     "premarket", "midsession", "preclose", "eod",
     "premarket_sa", "midsession_sa", "preclose_sa", "eod_sa",
     "watcher", "watcher_sa",
+    # Phase G.2 — option-method runner (single tick at a time, no
+    # market suffix; runs only while the US extended-hours window
+    # 11:00–23:55 KSA is open).
+    "method",
 )
 
 
@@ -138,6 +142,8 @@ def _dispatch(text: str) -> str:
             return _cmd_watcher(args)
         if cmd == "/markets":
             return _cmd_markets()
+        if cmd == "/method":
+            return _cmd_method(args)
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -190,6 +196,13 @@ Example: <code>/settime preclose 22:45</code>
 /watcher status — last ticks + today's alerts
 /watcher on — enable watcher
 /watcher off — disable watcher
+
+<b>Option method (Phase G)</b>
+/method status — runner state + per-direction state + today's count
+/method on — enable the SPY rule engine
+/method off — disable
+/method reset — clear in-flight state + today's cooldown
+/method history — last 10 signals
 
 <b>Markets</b>
 /markets — show ACTIVE_MARKETS + data-source health
@@ -389,6 +402,9 @@ def _cmd_cancel(args: list) -> str:
         running_keys = ("watcher_us_price", "watcher_us_news")
     elif brief == "watcher_sa":
         running_keys = ("watcher_sa_price", "watcher_sa_news")
+    elif brief == "method":
+        # Method runner registers as "method_tick" in _currently_running.
+        running_keys = ("method_tick",)
     else:
         running_keys = (brief,)
 
@@ -1064,6 +1080,160 @@ def _cmd_markets() -> str:
     lines.append("")
     lines.append("<i>Change ACTIVE_MARKETS via Railway env var "
                  "(e.g. <code>US,SA</code>) and redeploy.</i>")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# /method — option-method runner control (Phase G.2)
+# ---------------------------------------------------------------------------
+
+def _cmd_method(args: list) -> str:
+    if not args:
+        return ("Usage: <code>/method status|on|off|reset|history</code>\n"
+                "  • <code>/method status</code> — enabled, current state, "
+                "today's signal count\n"
+                "  • <code>/method on</code> — enable the runner\n"
+                "  • <code>/method off</code> — disable the runner\n"
+                "  • <code>/method reset</code> — clear in-flight state + "
+                "today's cooldown\n"
+                "  • <code>/method history</code> — last 10 signals")
+
+    sub = args[0].lower().strip()
+    if sub == "status":
+        return _cmd_method_status()
+    if sub == "on":
+        if not sheets.write_config("METHOD_ENABLED", "true"):
+            return "❌ Could not save METHOD_ENABLED=true to Config tab."
+        return ("✅ <b>Option method enabled</b>\n"
+                "Will start ticking on the next minute during US extended "
+                "hours (11:00–23:55 KSA, Mon–Fri).")
+    if sub == "off":
+        if not sheets.write_config("METHOD_ENABLED", "false"):
+            return "❌ Could not save METHOD_ENABLED=false to Config tab."
+        return ("🔕 <b>Option method disabled</b>\n"
+                "Scheduled ticks will skip silently. Re-enable with "
+                "<code>/method on</code>.")
+    if sub == "reset":
+        return _cmd_method_reset()
+    if sub == "history":
+        return _cmd_method_history()
+    return (f"❌ Unknown subcommand: <code>{sub}</code>\n"
+            "Use: <code>/method status|on|off|reset|history</code>")
+
+
+def _cmd_method_status() -> str:
+    from config import (METHOD_ENABLED as PY_METHOD_ENABLED,
+                        METHOD_INTERVAL_SEC as PY_INT,
+                        METHOD_TICKER as PY_TICKER,
+                        METHOD_MAX_DAILY_SIGNALS as PY_CAP)
+
+    cfg = sheets.read_config() or {}
+    raw = cfg.get("METHOD_ENABLED")
+    if raw is None or str(raw).strip() == "":
+        enabled = PY_METHOD_ENABLED
+    else:
+        enabled = str(raw).strip().lower() == "true"
+
+    today_str = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
+    cd_call = sheets.read_method_cooldown(today_str, "call") or {}
+    cd_put = sheets.read_method_cooldown(today_str, "put") or {}
+
+    try:
+        from core import method_state
+        snap = method_state.get_tracker().state_snapshot()
+    except Exception as e:
+        snap = {}
+        log_event("WARN", "commands",
+                  f"/method status tracker snapshot failed: {e}")
+
+    last_started = "—"
+    last_completed = "—"
+    interval_sec = PY_INT
+    try:
+        from webhook import app as webhook_app
+        last_started = webhook_app._last_method_run.get("started") or "—"
+        last_completed = webhook_app._last_method_run.get("completed") or "—"
+        interval_sec = (webhook_app._active_method_interval_sec
+                        or PY_INT)
+    except Exception:
+        pass
+
+    def _fmt_dir(d):
+        s = snap.get(d, {})
+        state = s.get("state", "—")
+        sig = s.get("signal_id") or "—"
+        return f"{state} ({sig})"
+
+    lines = ["<b>🎯 OPTION METHOD STATUS</b>", "─────────────"]
+    lines.append(f"State: {'✅ ENABLED' if enabled else '🔕 DISABLED'}")
+    lines.append(f"Ticker: <code>{PY_TICKER}</code>")
+    lines.append(f"Tick interval: every <code>{interval_sec}</code> sec")
+    lines.append(f"Daily cap: <code>{PY_CAP}</code> per direction")
+    lines.append(f"Last tick started: <code>{last_started}</code>")
+    lines.append(f"Last tick completed: <code>{last_completed}</code>")
+    lines.append("")
+    lines.append("<b>📊 Direction state</b>")
+    lines.append(f"  CALL: <code>{_fmt_dir('call')}</code>")
+    lines.append(f"  PUT:  <code>{_fmt_dir('put')}</code>")
+    lines.append("")
+    lines.append("<b>📅 Today's setup count</b>")
+    lines.append(f"  CALL: {cd_call.get('SetupCount', 0) or 0}/{PY_CAP}")
+    lines.append(f"  PUT:  {cd_put.get('SetupCount', 0) or 0}/{PY_CAP}")
+    return "\n".join(lines)
+
+
+def _cmd_method_reset() -> str:
+    """Force-DONE all active signals + clear today's cooldown rows.
+    In-memory tracker is wiped too so the next tick starts clean."""
+    today_str = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
+    sheet_signals_ok = sheets.reset_method_signals_active()
+    sheet_cd_ok = sheets.reset_method_cooldown(today_str)
+    try:
+        from core import method_state
+        method_state.get_tracker().force_reset()
+    except Exception as e:
+        return f"❌ Tracker reset failed: {e}"
+
+    notes = []
+    if not sheet_signals_ok:
+        notes.append("MethodSignals reset failed (see Logs)")
+    if not sheet_cd_ok:
+        notes.append(f"MethodCooldown reset for {today_str} failed")
+    suffix = ("\n<i>" + "; ".join(notes) + "</i>") if notes else ""
+    return ("🔄 <b>Method state reset</b>\n"
+            "  • In-memory tracker cleared\n"
+            "  • Active signals force-DONE in MethodSignals\n"
+            f"  • Today's cooldown rows cleared ({today_str})"
+            f"{suffix}")
+
+
+def _cmd_method_history() -> str:
+    rows = sheets.read_method_signals(limit=10) or []
+    if not rows:
+        return ("<b>🎯 OPTION METHOD HISTORY</b>\n"
+                "─────────────\n"
+                "<i>No signals yet.</i>")
+    lines = ["<b>🎯 OPTION METHOD HISTORY</b>",
+             "<i>Most recent first · last 10</i>",
+             "─────────────"]
+    for r in rows:
+        sid = r.get("SignalID", "—")
+        date = r.get("Date", "")
+        time = r.get("Time_KSA", "")
+        direction = (r.get("Direction", "") or "").upper()
+        state = (r.get("State", "") or "").upper()
+        trig = r.get("TriggerPrice", "")
+        tp1_hit = str(r.get("TP1Hit", "FALSE")).upper() == "TRUE"
+        invalid = r.get("InvalidatedAt", "")
+        result_emoji = "✅" if tp1_hit else (
+            "❌" if invalid else "•"
+        )
+        lines.append(
+            f"{result_emoji} <code>{date} {time}</code> "
+            f"{direction} @ <code>{trig}</code> · "
+            f"<i>{state}</i>"
+        )
+        lines.append(f"   <code>{sid}</code>")
     return "\n".join(lines)
 
 

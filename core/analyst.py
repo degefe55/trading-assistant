@@ -38,6 +38,9 @@ _cancel_flags = {
     "premarket_sa": False, "midsession_sa": False,
     "preclose_sa": False, "eod_sa": False,
     "watcher_sa": False,
+    # Phase G.2 — option-method runner. Cancellation skips the rest of a
+    # tick mid-flight (cooperative; no in-progress alert is interrupted).
+    "method": False,
 }
 
 

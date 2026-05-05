@@ -51,7 +51,8 @@ os.environ.setdefault("ACTIVE_MARKETS", "US")
 from core import commands, telegram_client, sheets
 from core.logger import log_event, get_log_buffer
 from config import (TELEGRAM_CHAT_ID, KSA_TZ, ACTIVE_MARKETS,
-                    WATCHER_PRICE_INTERVAL_MIN, WATCHER_NEWS_INTERVAL_MIN)
+                    WATCHER_PRICE_INTERVAL_MIN, WATCHER_NEWS_INTERVAL_MIN,
+                    METHOD_INTERVAL_SEC)
 import main as bot_main
 
 
@@ -108,6 +109,14 @@ _last_watcher_runs = {}      # {"price"|"news": iso ksa of last completion}
 _last_watcher_started = {}   # {"price"|"news": iso ksa of last start}
 _active_watcher_intervals = {}  # {"price": min, "news": min}
 
+# Phase G.2 — option-method runner state. Distinct lock from briefs
+# and from the watcher: a method tick should be skippable independent
+# of whatever the watcher is doing. Skip-on-busy semantics: if a tick
+# is in flight when the next interval fires, log and skip.
+_method_lock = threading.Lock()
+_last_method_run = {"started": None, "completed": None}
+_active_method_interval_sec = None
+
 
 # ---------------------------------------------------------------------------
 # HTTP endpoints
@@ -139,6 +148,9 @@ def status():
         "watcher_intervals_min": _active_watcher_intervals,
         "watcher_last_started_ksa": _last_watcher_started,
         "watcher_last_completed_ksa": _last_watcher_runs,
+        "method_interval_sec": _active_method_interval_sec,
+        "method_last_started_ksa": _last_method_run.get("started"),
+        "method_last_completed_ksa": _last_method_run.get("completed"),
         "now_utc": datetime.utcnow().isoformat(),
         "now_ksa": datetime.now(KSA_TZ).isoformat(),
     })
@@ -217,6 +229,44 @@ def manual_run_watcher_market(mode: str, market: str = "US"):
                         "spawned": f"watcher_{market.lower()}_{mode}"}), 202
     return jsonify({"ok": False, "error": reason,
                     "mode": mode, "market": market}), 409
+
+
+@app.route("/run/method_tick", methods=["POST", "GET"])
+def manual_run_method_tick():
+    """Manually fire one option-method tick. Same skip-on-busy semantics
+    as the scheduled job — if the lock is held, return 409."""
+    if not RUN_TOKEN:
+        return jsonify({"ok": False, "error": "RUN_TOKEN not configured"}), 503
+    if not _check_token():
+        return jsonify({"ok": False, "error": "invalid token"}), 401
+    spawned, reason = _spawn_method_tick(source="http")
+    if spawned:
+        return jsonify({"ok": True, "spawned": "method_tick"}), 202
+    return jsonify({"ok": False, "error": reason}), 409
+
+
+@app.route("/cancel/method", methods=["POST", "GET"])
+def cancel_method_endpoint():
+    """Request cancellation of the in-flight method tick (if any).
+    Cooperative — same pattern as /cancel/watcher."""
+    if not RUN_TOKEN:
+        return jsonify({"ok": False, "error": "RUN_TOKEN not configured"}), 503
+    if not _check_token():
+        return jsonify({"ok": False, "error": "invalid token"}), 401
+
+    with _running_lock:
+        is_running = "method_tick" in _currently_running
+
+    if not is_running:
+        return jsonify({"ok": False, "error": "not running"}), 409
+
+    from core import analyst as analyst_mod
+    flag_was_new = analyst_mod.request_cancel("method")
+    log_event("INFO", "method",
+              f"Cancellation requested for method via HTTP "
+              f"(new={flag_was_new})")
+    return jsonify({"ok": True,
+                    "was_already_pending": not flag_was_new}), 202
 
 
 @app.route("/cancel/watcher", methods=["POST", "GET"])
@@ -441,12 +491,16 @@ def _handle_callback_query(cb: dict):
         return jsonify({"ok": True, "ignored": "wrong chat"}), 200
 
     # Acknowledge fast — Telegram times out the spinner if we're slow
-    telegram_client.answer_callback_query(cb_id, text="Loading deep dive…")
+    telegram_client.answer_callback_query(cb_id, text="Loading…")
 
     # Route by prefix
     if data.startswith("deepdive:"):
         rec_id = data[len("deepdive:"):].strip()
         return _send_deep_dive(rec_id, parent_msg_id)
+
+    if data.startswith("method_cancel:"):
+        signal_id = data[len("method_cancel:"):].strip()
+        return _cancel_method_signal(signal_id, parent_msg_id)
 
     # Unknown callback — be honest, don't pretend it worked
     telegram_client.send_message(
@@ -559,6 +613,41 @@ def _send_deep_dive(rec_id: str, parent_msg_id):
                       f"MessageMap write failed for deepdive panel: {e}")
     log_event("INFO", "webhook", f"Sent deep dive for {rec_id}")
     return jsonify({"ok": True, "rec_id": rec_id}), 200
+
+
+def _cancel_method_signal(signal_id: str, parent_msg_id):
+    """Honor the 🛑 Cancel-tracking inline button on a method-option
+    entry alert. Tells the in-process tracker to mark the signal DONE
+    and persists the change to MethodSignals."""
+    if not signal_id or "-" not in signal_id:
+        telegram_client.send_message(
+            f"⚠️ Bad SignalID in button: <code>{signal_id[:60]}</code>",
+            reply_to_message_id=parent_msg_id,
+        )
+        return jsonify({"ok": False, "error": "bad signal_id"}), 200
+
+    try:
+        from core import method_state
+        cancelled = method_state.get_tracker().cancel_signal_by_id(signal_id)
+    except Exception as e:
+        log_event("ERROR", "method",
+                  f"cancel_signal_by_id({signal_id}) crashed: {e}")
+        telegram_client.send_message(
+            f"❌ Cancel failed: <code>{e}</code>",
+            reply_to_message_id=parent_msg_id,
+        )
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+    if not cancelled:
+        telegram_client.send_message(
+            f"ℹ️ <b>{signal_id}</b> isn't actively tracked anymore.",
+            reply_to_message_id=parent_msg_id,
+        )
+        return jsonify({"ok": True, "noop": True}), 200
+
+    log_event("INFO", "method",
+              f"User cancelled method signal {signal_id} via inline button")
+    return jsonify({"ok": True, "cancelled": signal_id}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +883,66 @@ def _scheduled_watcher_runner_sa(mode: str):
     _spawn_watcher_tick(mode, source="schedule", market="SA")
 
 
+# ---------------------------------------------------------------------------
+# Phase G.2 — option-method tick scheduling
+# ---------------------------------------------------------------------------
+
+def _spawn_method_tick(source: str) -> tuple:
+    """Try to acquire the method lock and run one tick in a daemon
+    thread. Skip-on-busy: if the lock is held, log and return False —
+    DO NOT QUEUE.
+
+    Returns (spawned: bool, reason: str)."""
+    if not _method_lock.acquire(blocking=False):
+        log_event("INFO", "method",
+                  f"method tick skipped (source={source}): lock held")
+        return False, "lock held"
+
+    with _running_lock:
+        _currently_running.add("method_tick")
+    _last_method_run["started"] = datetime.now(KSA_TZ).isoformat()
+
+    def _runner():
+        try:
+            from core import method_runner
+            try:
+                method_runner.run_method_tick()
+            except Exception as e:
+                err = (f"method tick crashed: {e}\n"
+                       f"{traceback.format_exc()}")
+                log_event("ERROR", "method", err)
+                try:
+                    telegram_client.send_error_alert(err[:1500])
+                except Exception:
+                    pass
+            _last_method_run["completed"] = datetime.now(KSA_TZ).isoformat()
+        finally:
+            with _running_lock:
+                _currently_running.discard("method_tick")
+            _method_lock.release()
+            try:
+                buf = get_log_buffer()
+                if buf:
+                    sheets.append_logs(buf)
+            except Exception as e:
+                print(f"method log flush failed: {e}", file=sys.stderr)
+
+    t = threading.Thread(target=_runner, daemon=True, name="method-tick")
+    t.start()
+    return True, "spawned"
+
+
+def _scheduled_method_runner():
+    """Cron entry point for the option-method runner. Runs every
+    METHOD_INTERVAL_SEC seconds; the runner itself re-gates on
+    enabled / hours / pause / cancel."""
+    if not _is_weekday_ksa():
+        log_event("INFO", "method",
+                  "method tick skipped: weekend in KSA")
+        return
+    _spawn_method_tick(source="schedule")
+
+
 def _self_ping():
     if not PUBLIC_URL:
         return
@@ -879,7 +1028,7 @@ def _load_watcher_intervals_from_config() -> dict:
 
 
 def rebuild_schedule():
-    global _active_times, _active_watcher_intervals
+    global _active_times, _active_watcher_intervals, _active_method_interval_sec
     with _scheduler_lock:
         schedule.clear()
 
@@ -920,9 +1069,20 @@ def rebuild_schedule():
         ).tag("watcher_sa_news")
         _active_watcher_intervals = intervals
 
+        # Phase G.2 — option-method tick. Runs unconditionally every
+        # METHOD_INTERVAL_SEC; the runner gates on enabled/hours/pause
+        # so dormant mode is a silent no-op (no Sheet writes, no
+        # Polygon calls).
+        method_sec = max(15, int(METHOD_INTERVAL_SEC))
+        schedule.every(method_sec).seconds.do(
+            _scheduled_method_runner
+        ).tag("method_tick")
+        _active_method_interval_sec = method_sec
+
         log_event("INFO", "scheduler",
                   f"Rebuilt schedule: us_briefs={times}, "
-                  f"sa_briefs={DEFAULT_TIMES_SA}, watcher={intervals}")
+                  f"sa_briefs={DEFAULT_TIMES_SA}, watcher={intervals}, "
+                  f"method_sec={method_sec}")
 
 
 def start_scheduler():

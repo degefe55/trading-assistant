@@ -120,3 +120,19 @@ SAHMK_BASE_URL = "https://app.sahmk.sa/api/v1"
 # Polygon.io — US intraday aggregates provider (Phase G prep).
 # Stocks Starter plan: real-time bars on /v2/aggs/ticker.
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
+
+# ============================================================
+# PHASE G.2 — OPTION-METHOD RULE ENGINE
+# ============================================================
+# Pure rule engine on SPY (or another ticker) that fires Telegram
+# alerts when the friend's setup forms. Defaults to dormant — flip
+# METHOD_ENABLED to true on Railway (or via /method on) to activate.
+# Sheet wins for METHOD_ENABLED at runtime; the env var is a fallback.
+METHOD_ENABLED = os.getenv("METHOD_ENABLED", "false").lower() == "true"
+METHOD_INTERVAL_SEC = int(os.getenv("METHOD_INTERVAL_SEC", "60"))
+METHOD_TICKER = os.getenv("METHOD_TICKER", "SPY")
+# Options-contract price band — read but unused in this phase. Wired
+# into the contract picker in Phase G.3.
+METHOD_OPTION_PRICE_MIN = float(os.getenv("METHOD_OPTION_PRICE_MIN", "3.00"))
+METHOD_OPTION_PRICE_MAX = float(os.getenv("METHOD_OPTION_PRICE_MAX", "3.90"))
+METHOD_MAX_DAILY_SIGNALS = int(os.getenv("METHOD_MAX_DAILY_SIGNALS", "20"))
