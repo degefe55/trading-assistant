@@ -119,18 +119,40 @@ SAHMK_API_KEY = os.getenv("SAHMK_API_KEY", "")
 SAHMK_BASE_URL = "https://app.sahmk.sa/api/v1"
 # Polygon.io — US intraday aggregates provider (Phase G prep).
 # Stocks Starter plan: real-time bars on /v2/aggs/ticker.
+# Still in use for the AI watcher / data_router; the option-method
+# runner moved to Databento ES futures for 24h coverage.
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
+# Databento — CME futures (ES) for the option-method runner. ES trades
+# nearly 24h on Globex so the bot can analyze pre/post US session, and
+# ES is the underlying behind TradingView's US500 chart that the
+# friend's setup is read on. (Trade execution is still SPX options on
+# IBKR — Databento is purely chart-data.)
+DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY", "")
+# CME Globex MDP3 — covers ES, NQ, RTY, YM, CL, GC, etc. Override via
+# env var if a different feed is needed (e.g. XCME.IFUT, OPRA).
+DATABENTO_DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3")
+# DATABENTO_SYMBOL_FORMAT — informational. Three ways to name a futures
+# contract on Databento; databento_client._stype_in_for() picks
+# stype_in automatically based on the shape:
+#   parent      "ES.FUT"   umbrella over all open ES contracts
+#   continuous  "ES.c.0"   synthetic front-month, auto-rolled at expiry
+#   raw_symbol  "ESM6"     specific contract (June 2026 ES here)
+# Default METHOD_TICKER below uses parent symbology — Databento returns
+# all open ES contracts; the runner picks the one with highest volume
+# as the de-facto front month.
 
 # ============================================================
 # PHASE G.2 — OPTION-METHOD RULE ENGINE
 # ============================================================
-# Pure rule engine on SPY (or another ticker) that fires Telegram
-# alerts when the friend's setup forms. Defaults to dormant — flip
-# METHOD_ENABLED to true on Railway (or via /method on) to activate.
-# Sheet wins for METHOD_ENABLED at runtime; the env var is a fallback.
+# Pure rule engine on ES futures (or another ticker) that fires
+# Telegram alerts when the friend's setup forms. Defaults to dormant —
+# flip METHOD_ENABLED to true on Railway (or via /method on) to
+# activate. Sheet wins for METHOD_ENABLED at runtime; the env var is a
+# fallback.
 METHOD_ENABLED = os.getenv("METHOD_ENABLED", "false").lower() == "true"
 METHOD_INTERVAL_SEC = int(os.getenv("METHOD_INTERVAL_SEC", "60"))
-METHOD_TICKER = os.getenv("METHOD_TICKER", "SPY")
+# ES front-month, parent symbology (see DATABENTO_SYMBOL_FORMAT above).
+METHOD_TICKER = os.getenv("METHOD_TICKER", "ES.FUT")
 # Options-contract price band — read but unused in this phase. Wired
 # into the contract picker in Phase G.3.
 METHOD_OPTION_PRICE_MIN = float(os.getenv("METHOD_OPTION_PRICE_MIN", "3.00"))

@@ -144,6 +144,8 @@ def _dispatch(text: str) -> str:
             return _cmd_markets()
         if cmd == "/method":
             return _cmd_method(args)
+        if cmd == "/method_health":
+            return _cmd_method_health()
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -199,10 +201,11 @@ Example: <code>/settime preclose 22:45</code>
 
 <b>Option method (Phase G)</b>
 /method status — runner state + per-direction state + today's count
-/method on — enable the SPY rule engine
+/method on — enable the ES-futures rule engine
 /method off — disable
 /method reset — clear in-flight state + today's cooldown
 /method history — last 10 signals
+/method_health — Databento data-source check (manual)
 
 <b>Markets</b>
 /markets — show ACTIVE_MARKETS + data-source health
@@ -1205,6 +1208,42 @@ def _cmd_method_reset() -> str:
             "  • Active signals force-DONE in MethodSignals\n"
             f"  • Today's cooldown rows cleared ({today_str})"
             f"{suffix}")
+
+
+def _cmd_method_health() -> str:
+    """Manual data-source health probe for the option-method runner.
+    Hits Databento with the configured METHOD_TICKER + a 1m bar; never
+    called on a schedule. Used after Railway redeploys to confirm the
+    DATABENTO_API_KEY env var actually reached the container."""
+    from config import METHOD_TICKER, DATABENTO_DATASET
+    try:
+        from core import databento_client
+    except Exception as e:
+        return f"❌ Could not import databento_client: {e}"
+
+    try:
+        result = databento_client.health_check()
+    except Exception as e:
+        return f"❌ Databento health-check crashed: {e}"
+
+    ok = result.get("ok")
+    err = result.get("error")
+    last = result.get("latest_close")
+
+    lines = ["<b>🩺 METHOD DATA-SOURCE HEALTH</b>", "─────────────"]
+    lines.append(f"Provider: <code>Databento ({DATABENTO_DATASET})</code>")
+    lines.append(f"Symbol:   <code>{METHOD_TICKER}</code>")
+    if ok:
+        lines.append(f"Status:   ✅ ok")
+        lines.append(f"Last close: <code>{last}</code>")
+    else:
+        lines.append(f"Status:   ❌ failed")
+        lines.append(f"Error: <code>{err or 'unknown'}</code>")
+        lines.append("")
+        lines.append("<i>Check Logs tab for the underlying HTTP error. "
+                     "Most common causes: missing DATABENTO_API_KEY env "
+                     "var on Railway, or symbol/dataset mismatch.</i>")
+    return "\n".join(lines)
 
 
 def _cmd_method_history() -> str:

@@ -2,15 +2,22 @@
 Phase G.2 — option-method per-tick runner.
 
 Single entry point `run_method_tick()` that the webhook scheduler
-calls every METHOD_INTERVAL_SEC during US extended hours. Pulls
-SPY bars from Polygon, calls the rule engine, then drives the
+calls every METHOD_INTERVAL_SEC during US extended hours. Pulls ES
+futures bars from Databento, calls the rule engine, then drives the
 state machine.
+
+ES (front-month e-mini S&P futures) replaced SPY in the Phase G data
+migration: ES trades nearly 24h on Globex so the runner has real
+data during pre/post US session, and ES is the underlying behind
+TradingView's US500 chart that the friend's setup is read on. Trade
+execution is still SPX options on IBKR — Databento is purely chart-
+data for the rule engine.
 
 All Telegram alerts and sheet writes live in core/method_state.py.
 This module is the gate-and-glue layer:
 
-    gates → polygon fetch → method_option.evaluate_setup
-                          → method_state.handle_tick
+    gates → databento fetch → method_option.evaluate_setup
+                            → method_state.handle_tick
 
 Pure data fetch + dispatch — no AI, $0 per tick.
 
@@ -25,7 +32,8 @@ from datetime import datetime, time as dtime
 
 from config import (KSA_TZ, METHOD_ENABLED, METHOD_INTERVAL_SEC,
                     METHOD_TICKER)
-from core import analyst, method_option, method_state, polygon_client, sheets
+from core import (analyst, databento_client, method_option,
+                  method_state, sheets)
 from core.logger import log_event
 
 
@@ -95,10 +103,12 @@ def run_method_tick() -> dict:
         return {"ran": False, "skipped_reason": "cancelled"}
 
     ticker = METHOD_TICKER
-    bars_1m = polygon_client.get_bars(ticker, 1, lookback_bars=_LOOKBACK_BARS)
-    bars_5m = polygon_client.get_bars(ticker, 5, lookback_bars=_LOOKBACK_BARS)
-    bars_10m = polygon_client.get_bars(ticker, 10,
-                                       lookback_bars=_LOOKBACK_BARS)
+    bars_1m = databento_client.get_bars(ticker, 1,
+                                        lookback_bars=_LOOKBACK_BARS)
+    bars_5m = databento_client.get_bars(ticker, 5,
+                                        lookback_bars=_LOOKBACK_BARS)
+    bars_10m = databento_client.get_bars(ticker, 10,
+                                         lookback_bars=_LOOKBACK_BARS)
 
     # Need *some* bars on each timeframe. The rule engine will already
     # degrade to NO_SETUP on insufficient data, but skipping early
