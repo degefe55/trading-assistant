@@ -12,10 +12,24 @@ from config import KSA_TZ, DEBUG_MODE
 # Local log buffer flushed to Sheet at end of each run
 _log_buffer = []
 
+# Drop INFO-level events whose (module, substring) matches any pair
+# below. Safety net for chatty paths that would otherwise fill the
+# Logs tab with no signal — fix the call site too, but having the
+# filter means a single noisy code path can't blow up the sheet
+# again. Substring is matched case-sensitively against `event`.
+NOISE_FILTER = [
+    ("method", "tick skipped"),
+    ("scheduler", "Scheduler thread started"),
+]
+
 
 def log_event(level: str, module: str, event: str, data: dict = None,
               tokens: int = 0, cost: float = 0.0):
     """Record an event. Flushes to Sheet at end of run."""
+    if level == "INFO":
+        for nm, sub in NOISE_FILTER:
+            if module == nm and sub in event:
+                return
     ts = datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M:%S")
     entry = {
         "timestamp": ts,

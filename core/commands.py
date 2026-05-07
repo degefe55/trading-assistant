@@ -148,6 +148,8 @@ def _dispatch(text: str) -> str:
             return _cmd_method_health()
         if cmd == "/method_test":
             return _cmd_method_test()
+        if cmd == "/trim_logs":
+            return _cmd_trim_logs()
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -1310,6 +1312,47 @@ def _cmd_method_test() -> str:
             f"Body: <code>{body}</code>\n\n"
             f"<i>If accepted, a synthetic CALL pre-signal Telegram "
             f"alert should arrive shortly.</i>")
+
+
+def _cmd_trim_logs() -> str:
+    """Manually trigger the Logs-tab trim. Useful right after an
+    incident where logs piled up faster than the 6-hourly cron, or
+    to confirm the 50000-row cap is doing what we think it does."""
+    from config import MAX_LOG_ROWS
+    ss = sheets._get_spreadsheet()
+    if ss is None:
+        return "❌ No spreadsheet access (check GOOGLE_SA_JSON env var)."
+
+    try:
+        ws = ss.worksheet("Logs")
+        before = max(0, ws.row_count - 1)
+    except Exception as e:
+        return f"❌ Could not read Logs tab row count: <code>{e}</code>"
+
+    try:
+        result = sheets.trim_logs_if_needed()
+    except Exception as e:
+        return f"❌ trim_logs crashed: <code>{e}</code>"
+
+    if result.get("error"):
+        return (f"❌ Trim failed: <code>{result['error']}</code>\n"
+                f"Before: <code>{before}</code> rows · cap "
+                f"<code>{MAX_LOG_ROWS}</code>")
+
+    deleted = result.get("deleted", 0)
+    remaining = result.get("remaining", before)
+    if not result.get("trimmed"):
+        return (f"ℹ️ <b>Logs under cap, nothing to do.</b>\n"
+                f"Before: <code>{before}</code> · "
+                f"Deleted: <code>0</code> · "
+                f"After: <code>{before}</code>\n"
+                f"<i>Cap is {MAX_LOG_ROWS} rows.</i>")
+
+    return (f"✂️ <b>Logs trimmed</b>\n"
+            f"Before: <code>{before}</code> · "
+            f"Deleted: <code>{deleted}</code> · "
+            f"After: <code>{remaining}</code>\n"
+            f"<i>Cap is {MAX_LOG_ROWS} rows.</i>")
 
 
 def _cmd_method_history() -> str:

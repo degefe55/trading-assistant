@@ -53,7 +53,8 @@ from core import commands, telegram_client, sheets
 from core.logger import log_event, get_log_buffer
 from config import (TELEGRAM_CHAT_ID, KSA_TZ, ACTIVE_MARKETS,
                     WATCHER_PRICE_INTERVAL_MIN, WATCHER_NEWS_INTERVAL_MIN,
-                    METHOD_INTERVAL_SEC, TRADINGVIEW_WEBHOOK_SECRET)
+                    METHOD_INTERVAL_SEC, TRADINGVIEW_WEBHOOK_SECRET,
+                    MAX_LOG_ROWS)
 import main as bot_main
 
 
@@ -1005,6 +1006,51 @@ def _spawn_tradingview_webhook(payload: dict) -> tuple:
     return True, "spawned"
 
 
+def _spawn_trim_logs(source: str) -> tuple:
+    """Run sheets.trim_logs_if_needed() in a daemon thread. Mirrors
+    _spawn_brief structure but doesn't take a lock — the trim is a
+    single delete_rows call (or a small chunk loop) and concurrent
+    trims would just race to a no-op. Returns (spawned, reason)."""
+    def _runner():
+        try:
+            try:
+                result = sheets.trim_logs_if_needed()
+                if result.get("trimmed"):
+                    log_event("INFO", "scheduler",
+                              f"trim_logs ({source}) ok: "
+                              f"deleted={result.get('deleted')} "
+                              f"remaining≈{result.get('remaining')}")
+            except Exception as e:
+                err = (f"trim_logs ({source}) crashed: {e}\n"
+                       f"{traceback.format_exc()}")
+                log_event("ERROR", "scheduler", err)
+                try:
+                    telegram_client.send_error_alert(err[:1500])
+                except Exception:
+                    pass
+        finally:
+            try:
+                buf = get_log_buffer()
+                if buf:
+                    sheets.append_logs(buf)
+            except Exception as e:
+                print(f"trim_logs log flush failed: {e}", file=sys.stderr)
+
+    try:
+        t = threading.Thread(target=_runner, daemon=True,
+                             name="trim-logs")
+        t.start()
+    except Exception as e:
+        log_event("ERROR", "scheduler", f"trim_logs thread start failed: {e}")
+        return False, f"thread start failed: {e}"
+    return True, "spawned"
+
+
+def _scheduled_trim_logs():
+    """Cron entry point for the 6-hourly Logs trim."""
+    _spawn_trim_logs(source="schedule")
+
+
 def _scheduled_method_runner():
     """Cron entry point for the option-method runner. Runs every
     METHOD_INTERVAL_SEC seconds; the runner itself re-gates on
@@ -1142,24 +1188,38 @@ def rebuild_schedule():
         ).tag("watcher_sa_news")
         _active_watcher_intervals = intervals
 
-        # Phase G.4 — option-method runner is now webhook-driven
-        # (TradingView Pine Script → /webhook/tradingview). The polling
-        # tick scheduling below is disabled; _scheduled_method_runner
-        # and core/method_runner.py are kept around as dormant code
-        # paths so we can flip back if needed.
+        # Phase G.4 — option-method runner is webhook-driven
+        # (TradingView Pine Script → /webhook/tradingview). When the
+        # runner-disabled flag is set we don't register the polling
+        # tick at all; that keeps the schedule's job list clean and
+        # stops the runner from firing per-tick "skipped" log lines
+        # (which is what filled the Logs tab and tripped the 10M cell
+        # ceiling). Flip METHOD_RUNNER_DISABLED in core/method_runner.py
+        # to re-enable.
+        from core.method_runner import METHOD_RUNNER_DISABLED
         method_sec = max(15, int(METHOD_INTERVAL_SEC))
-        # schedule.every(method_sec).seconds.do(
-        #     _scheduled_method_runner
-        # ).tag("method_tick")
-        _active_method_interval_sec = method_sec
+        if METHOD_RUNNER_DISABLED:
+            _active_method_interval_sec = None
+            log_event("INFO", "scheduler",
+                      "Method runner: webhook-driven (TradingView). "
+                      "Polling disabled, no scheduled tick.")
+        else:
+            schedule.every(method_sec).seconds.do(
+                _scheduled_method_runner
+            ).tag("method_tick")
+            _active_method_interval_sec = method_sec
+
+        # Phase G.4 — Logs auto-rotation. Trim the Logs tab every 6h
+        # so a runaway log path can't blow past the 10M cell ceiling
+        # again. Cap is config.MAX_LOG_ROWS (env-overridable).
+        schedule.every(6).hours.do(_scheduled_trim_logs).tag("trim_logs")
         log_event("INFO", "scheduler",
-                  "Method runner: webhook-driven (TradingView). "
-                  "Polling disabled.")
+                  f"Log rotation enabled, cap={MAX_LOG_ROWS} rows")
 
         log_event("INFO", "scheduler",
                   f"Rebuilt schedule: us_briefs={times}, "
                   f"sa_briefs={DEFAULT_TIMES_SA}, watcher={intervals}, "
-                  f"method_sec={method_sec} (polling disabled)")
+                  f"method_polling={'off' if METHOD_RUNNER_DISABLED else method_sec}")
 
 
 def start_scheduler():
@@ -1172,6 +1232,16 @@ def start_scheduler():
     t = threading.Thread(target=_scheduler_loop, daemon=True,
                          name="bot-scheduler")
     t.start()
+
+
+# Make sure the Logs tab has the canonical header before the scheduler
+# starts firing — drifted/missing headers were how get_all_records()
+# silently misaligned columns and helped fill the sheet to its 10M cell
+# limit. Best-effort: failures here are logged but don't block boot.
+try:
+    sheets.ensure_logs_header()
+except Exception as _e:
+    print(f"ensure_logs_header at boot failed: {_e}", file=sys.stderr)
 
 
 # Boot scheduler at import time so gunicorn launches it.

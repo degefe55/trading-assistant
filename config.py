@@ -39,6 +39,16 @@ DAILY_COST_ALERT_USD = float(os.getenv("DAILY_COST_ALERT_USD", "1.00"))
 MONTHLY_COST_CAP_USD = float(os.getenv("MONTHLY_COST_CAP_USD", "10.00"))
 
 # ============================================================
+# LOG ROTATION
+# ============================================================
+# Hard cap on rows in the Logs tab. The 10M cell ceiling on a Google
+# Sheet is what silently breaks ALL writes once exceeded — including
+# trade logs and brief outputs — so we self-trim well below it.
+# 50000 rows × 7 columns = 350k cells, leaving plenty of headroom for
+# the rest of the sheet.
+MAX_LOG_ROWS = int(os.getenv("MAX_LOG_ROWS", "50000"))
+
+# ============================================================
 # CURRENCY
 # ============================================================
 # SAR is pegged to USD at approximately 3.75

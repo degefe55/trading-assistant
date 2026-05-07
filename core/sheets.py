@@ -9,7 +9,7 @@ Phase B: full trade log writes triggered by /buy /sell commands
 """
 import json
 from datetime import datetime
-from config import GOOGLE_SHEET_URL, GOOGLE_SA_JSON, KSA_TZ
+from config import GOOGLE_SHEET_URL, GOOGLE_SA_JSON, KSA_TZ, MAX_LOG_ROWS
 from core.logger import log_event
 
 
@@ -83,6 +83,12 @@ SCHEMAS = {
     "MethodCooldown": ["Date", "Direction", "LastPreSignalAt",
                        "LastEntryAt", "SetupCount"],
 }
+
+# Header row for the Logs tab. Must stay in sync with append_logs() row
+# shape exactly — header drift is what caused get_all_records() to read
+# log rows as data, blowing up cell count and silently breaking writes
+# (that's how we hit the 10M cell ceiling).
+LOGS_HEADER = SCHEMAS["Logs"]
 
 DEFAULT_CONFIG_ROWS = [
     ["MAX_POSITION_PCT", "25", "Max % of portfolio in one stock"],
@@ -202,6 +208,108 @@ def append_logs(entries: list):
         ws.append_rows(rows)
     except Exception as e:
         log_event("ERROR", "sheets", f"Append logs failed: {e}")
+
+
+def trim_logs_if_needed() -> dict:
+    """Cap the Logs tab at MAX_LOG_ROWS data rows. When over the cap,
+    delete the oldest rows down to (MAX_LOG_ROWS - 5000) so we don't
+    have to trim again on every tick. Header (row 1) is preserved.
+
+    On very large overflows the single delete_rows call can run >30s
+    and time out — fall back to 10000-row chunks from the bottom of
+    the deletion range so we make progress even if we can't finish.
+
+    Returns: {"trimmed": bool, "deleted": N, "remaining": M}
+    """
+    ss = _get_spreadsheet()
+    if ss is None:
+        return {"trimmed": False, "deleted": 0, "remaining": 0,
+                "error": "no spreadsheet"}
+    try:
+        ws = ss.worksheet("Logs")
+    except Exception as e:
+        return {"trimmed": False, "deleted": 0, "remaining": 0,
+                "error": f"worksheet: {e}"}
+
+    try:
+        total_rows = ws.row_count
+    except Exception as e:
+        return {"trimmed": False, "deleted": 0, "remaining": 0,
+                "error": f"row_count: {e}"}
+
+    data_rows = max(0, total_rows - 1)
+    if data_rows <= MAX_LOG_ROWS:
+        return {"trimmed": False, "deleted": 0, "remaining": data_rows}
+
+    # Trim down to MAX_LOG_ROWS - 5000 (with a floor of 1) so we don't
+    # have to trim again every tick once we're over the cap.
+    target_rows = max(1, MAX_LOG_ROWS - 5000)
+    delete_count = data_rows - target_rows
+    # Sheet rows are 1-indexed, row 1 is the header. Oldest data is at
+    # row 2; delete [start_row, end_row] inclusive.
+    start_row = 2
+    end_row = 1 + delete_count
+
+    try:
+        ws.delete_rows(start_row, end_row)
+        deleted = delete_count
+    except Exception as e:
+        msg = str(e).lower()
+        if "timeout" in msg or "deadline" in msg or "504" in msg:
+            log_event("WARN", "sheets",
+                      f"trim_logs single delete timed out, retrying "
+                      f"in 10000-row chunks: {e}")
+            deleted = 0
+            chunk = 10000
+            cursor = end_row
+            while cursor >= start_row:
+                chunk_start = max(start_row, cursor - chunk + 1)
+                try:
+                    ws.delete_rows(chunk_start, cursor)
+                    deleted += (cursor - chunk_start + 1)
+                    cursor = chunk_start - 1
+                except Exception as ce:
+                    log_event("WARN", "sheets",
+                              f"trim_logs chunk delete failed at "
+                              f"{chunk_start}-{cursor}: {ce}")
+                    break
+        else:
+            log_event("WARN", "sheets", f"trim_logs delete failed: {e}")
+            return {"trimmed": False, "deleted": 0,
+                    "remaining": data_rows, "error": str(e)}
+
+    remaining = data_rows - deleted
+    log_event("INFO", "sheets",
+              f"logs trimmed: deleted {deleted} rows "
+              f"(was {data_rows}, now ~{remaining})")
+    return {"trimmed": True, "deleted": deleted, "remaining": remaining}
+
+
+def ensure_logs_header() -> bool:
+    """Verify row 1 of the Logs tab is the canonical LOGS_HEADER, and
+    rewrite it if not. Run once at boot — drifted/missing headers cause
+    get_all_records() to misalign columns, which is how we silently
+    burned through the 10M cell ceiling.
+
+    Returns True if the row 1 header is now correct (or was already).
+    """
+    ss = _get_spreadsheet()
+    if ss is None:
+        return False
+    try:
+        ws = ss.worksheet("Logs")
+        first_row = ws.row_values(1) or []
+        if first_row[:len(LOGS_HEADER)] == LOGS_HEADER:
+            return True
+        end_col = _col_letter(len(LOGS_HEADER))
+        ws.update(values=[LOGS_HEADER],
+                  range_name=f"A1:{end_col}1")
+        log_event("INFO", "sheets",
+                  f"Logs header rewritten (was: {first_row[:7]})")
+        return True
+    except Exception as e:
+        log_event("WARN", "sheets", f"ensure_logs_header failed: {e}")
+        return False
 
 
 def append_trade(trade: dict):

@@ -45,12 +45,16 @@ PAUSE_FILE = "/tmp/bot_paused.txt"
 # This file is preserved so the polling path can be re-enabled by
 # flipping the flag and re-registering the scheduler job.
 METHOD_RUNNER_DISABLED = True
-_disabled_log_emitted = False
 
 # US extended-hours window in KSA. Wide enough to cover pre-market
 # (≈11:00 KSA = 04:00 ET) through after-hours (≈23:55 KSA = 16:55 ET).
 METHOD_OPEN_KSA = dtime(11, 0)
 METHOD_CLOSE_KSA = dtime(23, 55)
+
+# Track the last skip reason so the runner only logs on transitions
+# (e.g. "we just left market hours") instead of once per tick. Set to
+# None on first run so the first state change still emits a line.
+_last_skip_state = None
 
 # Bars per timeframe — enough to seed MACD-26 + 9 signal + structural
 # 30-bar lookback comfortably.
@@ -87,31 +91,37 @@ def _resolve_enabled() -> bool:
 def run_method_tick() -> dict:
     """One tick of the option method. Returns a small status dict
     suitable for /status and HTTP responses."""
-    global _disabled_log_emitted
+    global _last_skip_state
     # Gate 0 (Phase G.4): dormant — option method is now webhook-driven.
+    # Return silently; the scheduler also no longer registers this tick,
+    # so reaching here means someone called it manually.
     if METHOD_RUNNER_DISABLED:
-        if not _disabled_log_emitted:
-            log_event("INFO", "method",
-                      "Polling runner dormant (Phase G.4); using "
-                      "/webhook/tradingview instead. Flip "
-                      "METHOD_RUNNER_DISABLED to re-enable.")
-            _disabled_log_emitted = True
         return {"ran": False, "skipped_reason": "runner-disabled"}
+
+    def _log_skip_once(reason: str):
+        global _last_skip_state
+        if _last_skip_state != reason:
+            log_event("INFO", "method", f"tick skipped: {reason}")
+            _last_skip_state = reason
 
     # Gate 1: enabled?
     if not _resolve_enabled():
-        log_event("INFO", "method", "tick skipped: disabled")
+        _log_skip_once("disabled")
         return {"ran": False, "skipped_reason": "disabled"}
 
     # Gate 2: paused?
     if _is_paused():
-        log_event("INFO", "method", "tick skipped: paused")
+        _log_skip_once("paused")
         return {"ran": False, "skipped_reason": "paused"}
 
     # Gate 3: hours window
     if not _is_method_hours_now():
-        log_event("INFO", "method", "tick skipped: off-hours")
+        _log_skip_once("off-hours")
         return {"ran": False, "skipped_reason": "off-hours"}
+
+    # We've cleared the gates — clear the skip-state cache so the next
+    # gate change logs once.
+    _last_skip_state = None
 
     # Gate 4: cancellation
     analyst.reset_cancel("method")
