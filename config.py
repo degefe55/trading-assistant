@@ -158,3 +158,9 @@ METHOD_TICKER = os.getenv("METHOD_TICKER", "ES.FUT")
 METHOD_OPTION_PRICE_MIN = float(os.getenv("METHOD_OPTION_PRICE_MIN", "3.00"))
 METHOD_OPTION_PRICE_MAX = float(os.getenv("METHOD_OPTION_PRICE_MAX", "3.90"))
 METHOD_MAX_DAILY_SIGNALS = int(os.getenv("METHOD_MAX_DAILY_SIGNALS", "20"))
+
+# Phase G.4 — TradingView webhook integration. Pine Script alerts hit
+# /webhook/tradingview with a JSON payload that includes this secret in
+# the "secret" field. Must match the Webhook Secret Token set in
+# TradingView Pine Script settings.
+TRADINGVIEW_WEBHOOK_SECRET = os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "")

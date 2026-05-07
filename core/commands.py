@@ -146,6 +146,8 @@ def _dispatch(text: str) -> str:
             return _cmd_method(args)
         if cmd == "/method_health":
             return _cmd_method_health()
+        if cmd == "/method_test":
+            return _cmd_method_test()
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -201,11 +203,12 @@ Example: <code>/settime preclose 22:45</code>
 
 <b>Option method (Phase G)</b>
 /method status — runner state + per-direction state + today's count
-/method on — enable the ES-futures rule engine
+/method on — enable the option-method runner
 /method off — disable
 /method reset — clear in-flight state + today's cooldown
 /method history — last 10 signals
 /method_health — Databento data-source check (manual)
+/method_test — fire a synthetic TradingView webhook to self-test (Phase G.4)
 
 <b>Markets</b>
 /markets — show ACTIVE_MARKETS + data-source health
@@ -1167,10 +1170,20 @@ def _cmd_method_status() -> str:
         sig = s.get("signal_id") or "—"
         return f"{state} ({sig})"
 
+    # Phase G.4 — runner is webhook-driven; the polling tick stats
+    # below stay around for diagnostic continuity but should read "—"
+    # while the runner is dormant.
+    from config import TRADINGVIEW_WEBHOOK_SECRET
+    secret_set = bool(TRADINGVIEW_WEBHOOK_SECRET)
+
     lines = ["<b>🎯 OPTION METHOD STATUS</b>", "─────────────"]
     lines.append(f"State: {'✅ ENABLED' if enabled else '🔕 DISABLED'}")
+    lines.append("Mode: <code>webhook-driven (TradingView)</code>")
+    lines.append(f"Webhook secret: "
+                 f"{'✅ set' if secret_set else '⚠️ not set'}")
     lines.append(f"Ticker: <code>{PY_TICKER}</code>")
-    lines.append(f"Tick interval: every <code>{interval_sec}</code> sec")
+    lines.append(f"Polling interval (dormant): "
+                 f"every <code>{interval_sec}</code> sec")
     lines.append(f"Daily cap: <code>{PY_CAP}</code> per direction")
     lines.append(f"Last tick started: <code>{last_started}</code>")
     lines.append(f"Last tick completed: <code>{last_completed}</code>")
@@ -1244,6 +1257,57 @@ def _cmd_method_health() -> str:
                      "Most common causes: missing DATABENTO_API_KEY env "
                      "var on Railway, or symbol/dataset mismatch.</i>")
     return "\n".join(lines)
+
+
+def _cmd_method_test() -> str:
+    """Phase G.4 — fire a synthetic pre_signal payload at our own
+    /webhook/tradingview endpoint to verify end-to-end wiring.
+
+    Useful right after configuring TRADINGVIEW_WEBHOOK_SECRET on
+    Railway: if the bot answers with a Telegram pre-signal alert
+    within a few seconds, the secret + dispatch path are correct."""
+    from config import TRADINGVIEW_WEBHOOK_SECRET
+    if not TRADINGVIEW_WEBHOOK_SECRET:
+        return ("❌ <code>TRADINGVIEW_WEBHOOK_SECRET</code> not set. "
+                "Configure it on Railway before running this self-test.")
+
+    public_url = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    port = os.environ.get("PORT", "8080")
+    base = public_url or f"http://localhost:{port}"
+    url = f"{base}/webhook/tradingview"
+
+    now = datetime.now(KSA_TZ)
+    payload = {
+        "secret": TRADINGVIEW_WEBHOOK_SECRET,
+        "event": "pre_signal",
+        "direction": "call",
+        "symbol": "TEST:US500",
+        "trigger_price": 7232.50,
+        "stop_price": 7224.30,
+        "tp1": 7240.70,
+        "tp2": 7245.00,
+        "tp3": 7250.00,
+        "fractal_high": 7231.10,
+        "fractal_low": 7220.50,
+        "timestamp": now.strftime("%Y-%m-%d %H:%M:%SZ"),
+    }
+
+    try:
+        import requests
+        r = requests.post(url, json=payload, timeout=5)
+        status = r.status_code
+        body = (r.text or "")[:300]
+        ok = r.ok
+    except Exception as e:
+        return f"❌ Test POST to <code>{url}</code> failed: <code>{e}</code>"
+
+    icon = "✅" if ok else "⚠️"
+    return (f"{icon} <b>Method webhook self-test fired</b>\n"
+            f"URL: <code>{url}</code>\n"
+            f"HTTP: <code>{status}</code>\n"
+            f"Body: <code>{body}</code>\n\n"
+            f"<i>If accepted, a synthetic CALL pre-signal Telegram "
+            f"alert should arrive shortly.</i>")
 
 
 def _cmd_method_history() -> str:

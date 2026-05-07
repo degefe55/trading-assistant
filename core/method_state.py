@@ -491,6 +491,280 @@ class MethodSignalTracker:
                 return True
         return False
 
+    # -----------------------------------------------------------------
+    # Phase G.4 — TradingView webhook driver
+    # -----------------------------------------------------------------
+
+    def handle_webhook_event(self, payload: dict) -> dict:
+        """Dispatch one TradingView alert payload. Idempotent on
+        re-delivery — each handler checks current state before acting,
+        so retries during the same lifecycle are safe."""
+        event = str(payload.get("event", "")).strip().lower()
+        direction = str(payload.get("direction", "")).strip().lower()
+        if direction not in ("call", "put"):
+            log_event("WARN", "method",
+                      f"webhook bad direction: {direction!r}")
+            return {"ok": False, "error": "bad direction"}
+        if not event:
+            log_event("WARN", "method", "webhook missing event")
+            return {"ok": False, "error": "missing event"}
+
+        ticker = _ticker_from_payload(payload)
+
+        if event == "pre_signal":
+            return self._webhook_pre_signal(direction, payload, ticker)
+        if event == "entry":
+            return self._webhook_entry(direction, payload, ticker)
+        if event in ("tp1_hit", "tp2_hit", "tp3_hit"):
+            return self._webhook_tp_hit(direction, event, payload, ticker)
+        if event == "invalidated":
+            return self._webhook_invalidated(direction, payload, ticker)
+        if event == "setup_ended":
+            return self._webhook_setup_ended(direction, payload, ticker)
+
+        log_event("WARN", "method", f"webhook unknown event: {event!r}")
+        return {"ok": False, "error": f"unknown event: {event}"}
+
+    def _webhook_pre_signal(self, direction: str, payload: dict,
+                            ticker: str) -> dict:
+        now = datetime.now(KSA_TZ)
+        date_str = now.strftime("%Y-%m-%d")
+
+        cd = sheets.read_method_cooldown(date_str, direction) or {}
+        try:
+            count_today = int(cd.get("SetupCount", 0) or 0)
+        except (ValueError, TypeError):
+            count_today = 0
+        if count_today >= METHOD_MAX_DAILY_SIGNALS:
+            log_event("INFO", "method",
+                      f"{direction} pre_signal suppressed: daily cap "
+                      f"({count_today}/{METHOD_MAX_DAILY_SIGNALS})")
+            return {"ok": True, "capped": True}
+
+        signal_id = _make_signal_id(direction)
+        trigger = _safe_num(payload.get("trigger_price"))
+        stop = _safe_num(payload.get("stop_price"))
+        tp1 = _safe_num(payload.get("tp1"))
+        tp2 = _safe_num(payload.get("tp2"))
+        tp3 = _safe_num(payload.get("tp3"))
+
+        row = {
+            "SignalID": signal_id,
+            "Date": date_str,
+            "Time_KSA": now.strftime("%H:%M:%S"),
+            "Direction": direction,
+            "State": PRE_SIGNAL,
+            "TriggerPrice": trigger if trigger is not None else "",
+            "StopPrice": stop if stop is not None else "",
+            "TP1": tp1 if tp1 is not None else "",
+            "TP2": tp2 if tp2 is not None else "",
+            "TP3": tp3 if tp3 is not None else "",
+            "TP1Hit": "FALSE",
+            "TP2Hit": "FALSE",
+            "TP3Hit": "FALSE",
+            "InvalidatedAt": "",
+            "StateUpdatedAt": now.strftime("%H:%M:%S"),
+            "Source": "tradingview_webhook",
+        }
+        sheets.write_method_state(signal_id, row)
+        sheets.bump_method_cooldown(date_str, direction, "LastPreSignalAt")
+        sheets.bump_method_cooldown(date_str, direction, "SetupCount")
+
+        self._dirs[direction] = {"state": PRE_SIGNAL,
+                                 "signal_id": signal_id, "row": row}
+
+        levels = {"stop": stop, "tp1": tp1, "tp2": tp2, "tp3": tp3}
+        _send_pre_signal_alert(ticker, direction, trigger, levels)
+        log_event("INFO", "method",
+                  f"{direction} PRE_SIGNAL (webhook) {signal_id} "
+                  f"trigger={trigger} stop={stop}")
+        return {"ok": True, "opened": True, "signal_id": signal_id}
+
+    def _webhook_entry(self, direction: str, payload: dict,
+                       ticker: str) -> dict:
+        cur = self._dirs[direction]
+        cur_state = cur.get("state", NO_SETUP)
+        signal_id = cur.get("signal_id")
+
+        now = datetime.now(KSA_TZ)
+        date_str = now.strftime("%Y-%m-%d")
+
+        # Idempotency: duplicate "entry" while already TRACKING is a noop.
+        if cur_state == TRACKING and signal_id:
+            log_event("INFO", "method",
+                      f"{direction} entry ignored: already TRACKING "
+                      f"{signal_id}")
+            return {"ok": True, "noop": "already_tracking"}
+
+        # No prior pre_signal: open inline (TradingView may collapse the
+        # two events on a fast setup). Daily cap still gates here so an
+        # entry-without-pre-signal can't exceed the limit.
+        if cur_state == NO_SETUP or not signal_id:
+            cd = sheets.read_method_cooldown(date_str, direction) or {}
+            try:
+                count_today = int(cd.get("SetupCount", 0) or 0)
+            except (ValueError, TypeError):
+                count_today = 0
+            if count_today >= METHOD_MAX_DAILY_SIGNALS:
+                log_event("INFO", "method",
+                          f"{direction} entry suppressed: daily cap "
+                          f"({count_today}/{METHOD_MAX_DAILY_SIGNALS})")
+                return {"ok": True, "capped": True}
+            signal_id = _make_signal_id(direction)
+            sheets.bump_method_cooldown(date_str, direction, "SetupCount")
+
+        trigger = _safe_num(payload.get("trigger_price"))
+        stop = _safe_num(payload.get("stop_price"))
+        tp1 = _safe_num(payload.get("tp1"))
+        tp2 = _safe_num(payload.get("tp2"))
+        tp3 = _safe_num(payload.get("tp3"))
+
+        row = (cur.get("row") or {}).copy()
+        row.update({
+            "SignalID": signal_id,
+            "Date": row.get("Date") or date_str,
+            "Time_KSA": row.get("Time_KSA") or now.strftime("%H:%M:%S"),
+            "Direction": direction,
+            "State": TRACKING,
+            "TriggerPrice": trigger if trigger is not None
+                            else row.get("TriggerPrice", ""),
+            "StopPrice": stop if stop is not None
+                         else row.get("StopPrice", ""),
+            "TP1": tp1 if tp1 is not None else row.get("TP1", ""),
+            "TP2": tp2 if tp2 is not None else row.get("TP2", ""),
+            "TP3": tp3 if tp3 is not None else row.get("TP3", ""),
+            "TP1Hit": row.get("TP1Hit", "FALSE"),
+            "TP2Hit": row.get("TP2Hit", "FALSE"),
+            "TP3Hit": row.get("TP3Hit", "FALSE"),
+            "InvalidatedAt": "",
+            "StateUpdatedAt": now.strftime("%H:%M:%S"),
+            "Source": "tradingview_webhook",
+        })
+        sheets.write_method_state(signal_id, row)
+        sheets.bump_method_cooldown(date_str, direction, "LastEntryAt")
+
+        self._dirs[direction] = {"state": TRACKING,
+                                 "signal_id": signal_id, "row": row}
+
+        try:
+            sheets.append_recommendation({
+                "rec_id": signal_id,
+                "brief_type": "method_option",
+                "ticker": ticker,
+                "market": "US",
+                "price_at_call": trigger,
+                "source": "tradingview_webhook",
+                "analysis": {
+                    "action": f"{direction.upper()} (option-method)",
+                    "confidence": "rule-based",
+                    "action_urgent": True,
+                    "one_line_plan": (
+                        f"{direction.upper()} entry at {trigger}; "
+                        f"stop {stop}, TP1 {tp1}, TP2 {tp2}, TP3 {tp3}"
+                    ),
+                    "action_price": trigger,
+                    "risk_score": 3,
+                    "halal_ai_signal": "",
+                    "deep_dive": {
+                        "stop_loss": stop,
+                        "target": tp1,
+                        "reasoning": (
+                            f"TradingView Pine Script {direction} entry. "
+                            f"Levels supplied by chart logic."
+                        ),
+                    },
+                },
+                "data_snapshot": {"news_count": 0, "top_news": []},
+            })
+        except Exception as e:
+            log_event("WARN", "method",
+                      f"Recommendations append failed for {signal_id}: {e}")
+
+        levels = {"stop": stop, "tp1": tp1, "tp2": tp2, "tp3": tp3}
+        _send_entry_alert(ticker, direction, signal_id, trigger,
+                          trigger, levels)
+        log_event("INFO", "method",
+                  f"{direction} ENTRY (webhook) {signal_id} @ {trigger}")
+        return {"ok": True, "promoted": True, "signal_id": signal_id}
+
+    def _webhook_tp_hit(self, direction: str, event: str,
+                        payload: dict, ticker: str) -> dict:
+        cur = self._dirs[direction]
+        signal_id = cur.get("signal_id")
+        if not signal_id:
+            log_event("INFO", "method",
+                      f"{direction} {event} ignored: no active signal")
+            return {"ok": True, "noop": "no_active_signal"}
+
+        tp_label = event.replace("_hit", "").upper()    # tp1_hit → TP1
+        flag_field = f"{tp_label}Hit"
+        row = (cur.get("row") or {}).copy()
+        if str(row.get(flag_field, "FALSE")).upper() == "TRUE":
+            log_event("INFO", "method",
+                      f"{direction} {tp_label} already hit for {signal_id}")
+            return {"ok": True, "noop": "already_hit"}
+
+        tp_level = (_safe_num(payload.get(tp_label.lower()))
+                    or _safe_num(row.get(tp_label)))
+
+        row[flag_field] = "TRUE"
+        row["StateUpdatedAt"] = datetime.now(KSA_TZ).strftime("%H:%M:%S")
+        sheets.write_method_state(signal_id, row)
+        self._dirs[direction]["row"] = row
+
+        _send_tp_hit_alert(ticker, direction, tp_label, tp_level)
+        log_event("INFO", "method",
+                  f"{direction} {tp_label} HIT (webhook) {signal_id}")
+        return {"ok": True, "tp_hit": tp_label, "signal_id": signal_id}
+
+    def _webhook_invalidated(self, direction: str, payload: dict,
+                             ticker: str) -> dict:
+        cur = self._dirs[direction]
+        signal_id = cur.get("signal_id")
+        if not signal_id:
+            log_event("INFO", "method",
+                      f"{direction} invalidated ignored: no active signal")
+            return {"ok": True, "noop": "no_active_signal"}
+
+        row = (cur.get("row") or {}).copy()
+        now_str = datetime.now(KSA_TZ).strftime("%H:%M:%S")
+        row["State"] = DONE
+        row["InvalidatedAt"] = now_str
+        row["StateUpdatedAt"] = now_str
+        sheets.write_method_state(signal_id, row)
+
+        stop = (_safe_num(payload.get("stop_price"))
+                or _safe_num(row.get("StopPrice")))
+
+        self._dirs[direction] = {"state": NO_SETUP, "signal_id": None,
+                                 "row": None}
+        _send_invalidated_alert(ticker, direction, signal_id, stop)
+        log_event("INFO", "method",
+                  f"{direction} INVALIDATED (webhook) {signal_id}")
+        return {"ok": True, "invalidated": True, "signal_id": signal_id}
+
+    def _webhook_setup_ended(self, direction: str, payload: dict,
+                             ticker: str) -> dict:
+        cur = self._dirs[direction]
+        signal_id = cur.get("signal_id")
+        if not signal_id:
+            log_event("INFO", "method",
+                      f"{direction} setup_ended ignored: no active signal")
+            return {"ok": True, "noop": "no_active_signal"}
+
+        row = (cur.get("row") or {}).copy()
+        now_str = datetime.now(KSA_TZ).strftime("%H:%M:%S")
+        row["State"] = DONE
+        row["StateUpdatedAt"] = now_str
+        sheets.write_method_state(signal_id, row)
+
+        self._dirs[direction] = {"state": NO_SETUP, "signal_id": None,
+                                 "row": None}
+        _send_setup_end_alert(ticker, direction, signal_id)
+        log_event("INFO", "method",
+                  f"{direction} SETUP_END (webhook) {signal_id}")
+        return {"ok": True, "setup_ended": True, "signal_id": signal_id}
+
 
 # ---------------------------------------------------------------------------
 # Singleton accessor
@@ -509,6 +783,16 @@ def get_tracker() -> MethodSignalTracker:
             _tracker = MethodSignalTracker()
             _tracker.rehydrate_from_sheets()
     return _tracker
+
+
+def handle_webhook_event(payload: dict) -> dict:
+    """Module-level entry point for the TradingView webhook. Routes to
+    the singleton tracker. Caller (the webhook endpoint) runs this in a
+    background thread so the HTTP response can return < 200ms."""
+    if not isinstance(payload, dict):
+        log_event("WARN", "method", "webhook payload not a dict")
+        return {"ok": False, "error": "payload not dict"}
+    return get_tracker().handle_webhook_event(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +895,18 @@ def _make_signal_id(direction: str) -> str:
             f"{direction.upper()}")
 
 
+def _ticker_from_payload(payload: dict) -> str:
+    """Extract a display ticker from the payload. TradingView sends
+    'CAPITALCOM:US500' style symbols — strip the exchange prefix.
+    Falls back to METHOD_TICKER if symbol is missing."""
+    sym = str(payload.get("symbol", "") or "").strip()
+    if sym:
+        if ":" in sym:
+            sym = sym.split(":", 1)[1]
+        return sym or METHOD_TICKER
+    return METHOD_TICKER
+
+
 # ---------------------------------------------------------------------------
 # Telegram alerts
 # ---------------------------------------------------------------------------
@@ -647,15 +943,24 @@ def _send_entry_alert(ticker, direction, signal_id, entry_price,
         "text": "🛑 Cancel tracking",
         "callback_data": f"method_cancel:{signal_id}",
     }]]
+
+    tp2 = levels.get("tp2")
+    tp3 = levels.get("tp3")
+    tp2_line = (f"TP2: <code>{_fmt(tp2)}</code>"
+                if tp2 not in (None, "")
+                else "TP2: VWAP +2σ <i>(not available)</i>")
+    tp3_line = (f"TP3: <code>{_fmt(tp3)}</code>"
+                if tp3 not in (None, "")
+                else "TP3: VWAP +3σ <i>(not available)</i>")
+
     text = (
         f"🟢 <b>ENTRY SIGNAL — {ticker} {side}</b>\n"
         f"Trigger: <code>{_fmt(entry_price)}</code> "
         f"(1m close {op} <code>{_fmt(trigger_level)}</code>)\n"
         f"Stop: <code>{_fmt(levels.get('stop'))}</code>\n"
-        f"TP1: <code>{_fmt(levels.get('tp1'))}</code> "
-        f"(1:1 measured move)\n"
-        f"TP2: VWAP +2σ <i>(not available yet)</i>\n"
-        f"TP3: VWAP +3σ <i>(not available yet)</i>\n"
+        f"TP1: <code>{_fmt(levels.get('tp1'))}</code>\n"
+        f"{tp2_line}\n"
+        f"{tp3_line}\n"
         f"<i>SignalID: {signal_id}</i>"
     )
     try:

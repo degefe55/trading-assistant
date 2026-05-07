@@ -32,6 +32,7 @@ Env vars:
     PUBLIC_URL          this service's public URL, used for self-ping
     BRIEF_TIMEOUT_SEC   max seconds a brief may run (default 300)
 """
+import hmac
 import os
 import sys
 import threading
@@ -52,7 +53,7 @@ from core import commands, telegram_client, sheets
 from core.logger import log_event, get_log_buffer
 from config import (TELEGRAM_CHAT_ID, KSA_TZ, ACTIVE_MARKETS,
                     WATCHER_PRICE_INTERVAL_MIN, WATCHER_NEWS_INTERVAL_MIN,
-                    METHOD_INTERVAL_SEC)
+                    METHOD_INTERVAL_SEC, TRADINGVIEW_WEBHOOK_SECRET)
 import main as bot_main
 
 
@@ -243,6 +244,40 @@ def manual_run_method_tick():
     if spawned:
         return jsonify({"ok": True, "spawned": "method_tick"}), 202
     return jsonify({"ok": False, "error": reason}), 409
+
+
+@app.route("/webhook/tradingview", methods=["POST"])
+def tradingview_webhook():
+    """Phase G.4 — TradingView Pine Script alert receiver. Replaces the
+    polling-based option method.
+
+    MUST return < 200ms (TradingView retries slow webhooks). All actual
+    work — sheet writes, Telegram sends — runs in a background thread.
+    """
+    if not TRADINGVIEW_WEBHOOK_SECRET:
+        log_event("WARN", "webhook_tv",
+                  "rejected: TRADINGVIEW_WEBHOOK_SECRET not configured")
+        return jsonify({"ok": False, "error": "not configured"}), 503
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        log_event("WARN", "webhook_tv", "rejected: invalid JSON body")
+        return jsonify({"ok": False, "error": "invalid JSON"}), 400
+
+    supplied = str(payload.get("secret", "") or "")
+    if not hmac.compare_digest(supplied, TRADINGVIEW_WEBHOOK_SECRET):
+        log_event("WARN", "webhook_tv",
+                  "rejected: secret mismatch")
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    # Strip the secret before handing off — no need to keep it in the
+    # background thread or any logged structures.
+    safe_payload = {k: v for k, v in payload.items() if k != "secret"}
+
+    spawned, reason = _spawn_tradingview_webhook(safe_payload)
+    if spawned:
+        return jsonify({"ok": True, "accepted": True}), 200
+    return jsonify({"ok": False, "error": reason}), 500
 
 
 @app.route("/cancel/method", methods=["POST", "GET"])
@@ -932,6 +967,44 @@ def _spawn_method_tick(source: str) -> tuple:
     return True, "spawned"
 
 
+def _spawn_tradingview_webhook(payload: dict) -> tuple:
+    """Phase G.4 — dispatch a TradingView alert payload in a daemon
+    thread. Mirrors _spawn_brief structure but doesn't need a per-event
+    lock: the underlying tracker is the single point of serialization,
+    and webhook events for different signals can interleave safely.
+
+    Returns (spawned: bool, reason: str)."""
+    def _runner():
+        try:
+            from core import method_state
+            try:
+                method_state.handle_webhook_event(payload)
+            except Exception as e:
+                err = (f"tradingview webhook handler crashed: {e}\n"
+                       f"{traceback.format_exc()}")
+                log_event("ERROR", "webhook_tv", err)
+                try:
+                    telegram_client.send_error_alert(err[:1500])
+                except Exception:
+                    pass
+        finally:
+            try:
+                buf = get_log_buffer()
+                if buf:
+                    sheets.append_logs(buf)
+            except Exception as e:
+                print(f"webhook_tv log flush failed: {e}", file=sys.stderr)
+
+    try:
+        t = threading.Thread(target=_runner, daemon=True,
+                             name="tradingview-webhook")
+        t.start()
+    except Exception as e:
+        log_event("ERROR", "webhook_tv", f"thread start failed: {e}")
+        return False, f"thread start failed: {e}"
+    return True, "spawned"
+
+
 def _scheduled_method_runner():
     """Cron entry point for the option-method runner. Runs every
     METHOD_INTERVAL_SEC seconds; the runner itself re-gates on
@@ -1069,20 +1142,24 @@ def rebuild_schedule():
         ).tag("watcher_sa_news")
         _active_watcher_intervals = intervals
 
-        # Phase G.2 — option-method tick. Runs unconditionally every
-        # METHOD_INTERVAL_SEC; the runner gates on enabled/hours/pause
-        # so dormant mode is a silent no-op (no Sheet writes, no
-        # Polygon calls).
+        # Phase G.4 — option-method runner is now webhook-driven
+        # (TradingView Pine Script → /webhook/tradingview). The polling
+        # tick scheduling below is disabled; _scheduled_method_runner
+        # and core/method_runner.py are kept around as dormant code
+        # paths so we can flip back if needed.
         method_sec = max(15, int(METHOD_INTERVAL_SEC))
-        schedule.every(method_sec).seconds.do(
-            _scheduled_method_runner
-        ).tag("method_tick")
+        # schedule.every(method_sec).seconds.do(
+        #     _scheduled_method_runner
+        # ).tag("method_tick")
         _active_method_interval_sec = method_sec
+        log_event("INFO", "scheduler",
+                  "Method runner: webhook-driven (TradingView). "
+                  "Polling disabled.")
 
         log_event("INFO", "scheduler",
                   f"Rebuilt schedule: us_briefs={times}, "
                   f"sa_briefs={DEFAULT_TIMES_SA}, watcher={intervals}, "
-                  f"method_sec={method_sec}")
+                  f"method_sec={method_sec} (polling disabled)")
 
 
 def start_scheduler():

@@ -39,6 +39,14 @@ from core.logger import log_event
 
 PAUSE_FILE = "/tmp/bot_paused.txt"
 
+# Phase G.4 — runner is dormant; the option method is now driven by
+# TradingView Pine Script webhooks (see webhook/app.py
+# /webhook/tradingview + core.method_state.handle_webhook_event).
+# This file is preserved so the polling path can be re-enabled by
+# flipping the flag and re-registering the scheduler job.
+METHOD_RUNNER_DISABLED = True
+_disabled_log_emitted = False
+
 # US extended-hours window in KSA. Wide enough to cover pre-market
 # (≈11:00 KSA = 04:00 ET) through after-hours (≈23:55 KSA = 16:55 ET).
 METHOD_OPEN_KSA = dtime(11, 0)
@@ -79,6 +87,17 @@ def _resolve_enabled() -> bool:
 def run_method_tick() -> dict:
     """One tick of the option method. Returns a small status dict
     suitable for /status and HTTP responses."""
+    global _disabled_log_emitted
+    # Gate 0 (Phase G.4): dormant — option method is now webhook-driven.
+    if METHOD_RUNNER_DISABLED:
+        if not _disabled_log_emitted:
+            log_event("INFO", "method",
+                      "Polling runner dormant (Phase G.4); using "
+                      "/webhook/tradingview instead. Flip "
+                      "METHOD_RUNNER_DISABLED to re-enable.")
+            _disabled_log_emitted = True
+        return {"ran": False, "skipped_reason": "runner-disabled"}
+
     # Gate 1: enabled?
     if not _resolve_enabled():
         log_event("INFO", "method", "tick skipped: disabled")
