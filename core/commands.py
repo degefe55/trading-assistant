@@ -1271,10 +1271,12 @@ def _cmd_method_test() -> str:
         return ("❌ <code>TRADINGVIEW_WEBHOOK_SECRET</code> not set. "
                 "Configure it on Railway before running this self-test.")
 
-    public_url = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    # Always self-call via localhost. Going through PUBLIC_URL forces a
+    # round-trip through Railway's edge (DNS + TLS + ingress) which can
+    # fail even when the container is healthy — and the goal here is to
+    # verify the local handler + secret, not the edge.
     port = os.environ.get("PORT", "8080")
-    base = public_url or f"http://localhost:{port}"
-    url = f"{base}/webhook/tradingview"
+    url = f"http://localhost:{port}/webhook/tradingview"
 
     now = datetime.now(KSA_TZ)
     payload = {
