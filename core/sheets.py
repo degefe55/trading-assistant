@@ -546,29 +546,55 @@ def read_watchlist(default: list = None, market: str = "US") -> list:
     """Return the user's customized watchlist for the given market, or
     `default` if unset. US uses the legacy WATCHLIST key; other markets
     use WATCHLIST_<MARKET> (e.g. WATCHLIST_SA).
+
+    Bug-1 fix — Google Sheets in most locales reads "2222,1321" as the
+    number 22,221,321 (treats the comma as a thousands separator) and
+    stores it as int. gspread then returns the int, str() turns it
+    back into "22221321", and split(",") yields a single concatenated
+    chunk. Two defenses:
+      1. Accept multiple separators (',' ';' '|' whitespace) on read.
+      2. If a chunk is all-digits and longer than 4 chars and divisible
+         by 4, treat it as a string of concatenated 4-digit Saudi
+         tickers and split into chunks. Saudi codes are always exactly
+         4 digits per the validator + SAHMK API.
     """
+    import re
     cfg = read_config() or {}
-    # gspread returns numeric-looking cells as int (e.g. a single Saudi
-    # ticker "1321" parses as 1321). Coerce to str at the boundary so
-    # downstream .strip()/.split() don't crash on AttributeError.
     raw_val = cfg.get(_watchlist_key(market))
     raw = str(raw_val).strip() if raw_val is not None else ""
     if not raw:
         return list(default or [])
-    parts = [p.strip().upper() for p in raw.split(",") if p.strip()]
-    return parts
+    parts = [p.strip().upper() for p in re.split(r"[,;|\s]+", raw)
+             if p.strip()]
+    out = []
+    for p in parts:
+        if p.isdigit() and len(p) > 4 and len(p) % 4 == 0:
+            for i in range(0, len(p), 4):
+                out.append(p[i:i + 4])
+        else:
+            out.append(p)
+    return out
 
 
 def write_watchlist(tickers: list, market: str = "US") -> bool:
-    """Persist the watchlist for the given market to the Config tab."""
-    clean = [t.strip().upper() for t in tickers if t and t.strip()]
+    """Persist the watchlist for the given market to the Config tab.
+
+    Bug-1 fix — for SA (Saudi tickers are all-digit) write with a
+    semicolon separator so Google Sheets doesn't auto-interpret
+    '2222,1321' as the number 22,221,321 and silently concatenate
+    the watchlist. US tickers are alphanumeric and immune, so we
+    keep their existing comma format for backward compat. The
+    reader accepts both."""
+    clean = [str(t).strip().upper() for t in tickers
+             if t is not None and str(t).strip()]
     seen = set()
     deduped = []
     for t in clean:
         if t not in seen:
             seen.add(t)
             deduped.append(t)
-    return write_config(_watchlist_key(market), ",".join(deduped))
+    sep = "; " if market.upper() == "SA" else ","
+    return write_config(_watchlist_key(market), sep.join(deduped))
 
 
 # ----- Focus tab writers (max 3 entries, drops oldest) -----
