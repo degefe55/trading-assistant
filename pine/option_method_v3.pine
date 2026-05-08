@@ -3,7 +3,7 @@
 // Attach to: CAPITALCOM:US500 on 5-minute chart
 
 //@version=6
-indicator("Option Method (Phase G.4.2)", overlay=true, max_lines_count=50, max_labels_count=50)
+indicator("Option Method (Phase G.4.3)", overlay=true, max_lines_count=50, max_labels_count=50)
 
 // ============================================================================
 // INPUTS
@@ -49,11 +49,13 @@ if is_fractal_high_5m
 if is_fractal_low_5m
     last_5m_fractal_low := low[2]
 
-[fh_1m, fl_1m, last_close_1m] = request.security(syminfo.tickerid, "1",
+// G.4.3 — only the 1m fractal levels are still consumed (entry trigger
+// uses the 5-min `close` directly per G.4.2). The 1m close request
+// here was removed as dead code.
+[fh_1m, fl_1m] = request.security(syminfo.tickerid, "1",
      [
        (high[2] > high[3] and high[2] > high[4] and high[2] > high[1] and high[2] > high[0]) ? high[2] : na,
-       (low[2]  < low[3]  and low[2]  < low[4]  and low[2]  < low[1]  and low[2]  < low[0])  ? low[2]  : na,
-       close
+       (low[2]  < low[3]  and low[2]  < low[4]  and low[2]  < low[1]  and low[2]  < low[0])  ? low[2]  : na
      ],
      barmerge.gaps_off, barmerge.lookahead_off)
 
