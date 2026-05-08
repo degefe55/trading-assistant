@@ -331,6 +331,18 @@ def run_preclose_verdict():
     positions = sheets.read_positions()
     us_positions = [p for p in positions if p.get("Market", "US") == "US"]
 
+    # Empty-positions short-circuit: nothing for Haiku to filter and
+    # nothing for Sonnet to reason about. Send a quiet confirmation so
+    # the user knows the brief actually fired.
+    if not us_positions:
+        telegram_client.send_message(
+            "🔔 <b>Pre-close</b> · <i>No open US positions, "
+            "no analysis needed.</i>"
+        )
+        log_event("INFO", "main",
+                  "Pre-close skipped Haiku/Sonnet: no US positions")
+        return
+
     analyses = []
     cancelled = False
 
@@ -605,6 +617,17 @@ def run_preclose_verdict_sa():
     analyst.reset_cancel("preclose_sa")
 
     positions = sheets.read_positions(market="SA") or []
+
+    # Empty-positions short-circuit (same rationale as US pre-close).
+    if not positions:
+        telegram_client.send_message(
+            "🇸🇦 <b>Pre-close · Tadawul</b> · "
+            "<i>No open SA positions, no analysis needed.</i>"
+        )
+        log_event("INFO", "main",
+                  "Saudi pre-close skipped Haiku/Sonnet: no SA positions")
+        return
+
     analyses = []
     cancelled = False
 
