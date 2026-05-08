@@ -118,8 +118,6 @@ def _dispatch(text: str) -> str:
             return _cmd_resume()
         if cmd == "/run":
             return _cmd_run(args)
-        if cmd == "/runlist":
-            return _cmd_runlist()
         if cmd == "/cancel":
             return _cmd_cancel(args)
         if cmd == "/times":
@@ -144,10 +142,6 @@ def _dispatch(text: str) -> str:
             return _cmd_markets()
         if cmd == "/method":
             return _cmd_method(args)
-        if cmd == "/method_health":
-            return _cmd_method_health()
-        if cmd == "/method_test":
-            return _cmd_method_test()
         if cmd == "/trim_logs":
             return _cmd_trim_logs()
         if cmd == "/diagnose":
@@ -176,7 +170,7 @@ def _cmd_help() -> str:
 /times — show brief schedule
 
 <b>Manual briefs</b>
-/runlist — show /run options
+/run — show /run options + fire a brief
 <code>/run premarket</code>
 <code>/run midsession</code>
 <code>/run preclose</code>
@@ -199,6 +193,7 @@ Or: tap a ticker button on a brief, or reply directly to a brief.
 <b>Schedule</b>
 <code>/settime BRIEF HH:MM</code> — change brief time
 Example: <code>/settime preclose 22:45</code>
+Example: <code>/settime preclose_sa 14:30</code>
 
 <b>Watcher (always-on)</b>
 /watcher status — last ticks + today's alerts
@@ -207,18 +202,22 @@ Example: <code>/settime preclose 22:45</code>
 
 <b>Option method (Phase G)</b>
 /method status — runner state + per-direction state + today's count
-/method on — enable the option-method runner
-/method off — disable
+/method on — enable (TradingView webhooks honored)
+/method off — disable (webhooks return 403)
 /method reset — clear in-flight state + today's cooldown
 /method history — last 10 signals
-/method_health — Databento data-source check (manual)
-/method_test — fire a synthetic TradingView webhook to self-test (Phase G.4)
+/method test — fire a synthetic webhook to self-test
+/method debug — Databento data-source health (legacy polling path)
 
 <b>Markets</b>
 /markets — show ACTIVE_MARKETS + data-source health
 
+<b>Diagnostics</b>
+<code>/diagnose [WINDOW_MIN]</code> — scan Logs for error patterns (default 60m)
+/trim_logs — manually cap the Logs tab
+
 <b>Control</b>
-/pause — silence scheduled briefs
+/pause — silence scheduled briefs (persists in Sheet)
 /resume — re-enable briefs
 /help — this menu
 
@@ -376,7 +375,10 @@ def _cmd_resume() -> str:
 # Manual brief triggers and schedule management
 # ---------------------------------------------------------------------------
 
-def _cmd_runlist() -> str:
+def _format_runlist() -> str:
+    """Brief-trigger menu shown when `/run` is called with no args.
+    Phase A — formerly the standalone /runlist command; folded into
+    /run since they were redundant."""
     sa_lines = ""
     if "SA" in ACTIVE_MARKETS:
         sa_lines = ("\n\n<b>🇸🇦 Saudi (Tadawul)</b>\n"
@@ -455,7 +457,7 @@ def _cmd_cancel(args: list) -> str:
 
 def _cmd_run(args: list) -> str:
     if not args:
-        return _cmd_runlist()
+        return _format_runlist()
 
     brief = _normalize_brief_arg(args[0])
     if brief not in VALID_BRIEFS or brief.startswith("watcher"):
@@ -463,7 +465,7 @@ def _cmd_run(args: list) -> str:
         # path — the watcher has its own /watcher command surface and
         # spawn function.
         return (f"❌ Unknown brief: <code>{args[0]}</code>\n"
-                f"Send /runlist to see options.")
+                f"Send <code>/run</code> with no args to see options.")
 
     if brief.endswith("_sa") and "SA" not in ACTIVE_MARKETS:
         return ("⏸ <b>SA market not active in ACTIVE_MARKETS</b> — "
@@ -1146,14 +1148,18 @@ def _cmd_markets() -> str:
 
 def _cmd_method(args: list) -> str:
     if not args:
-        return ("Usage: <code>/method status|on|off|reset|history</code>\n"
+        return ("Usage: <code>/method status|on|off|reset|history|test|debug</code>\n"
                 "  • <code>/method status</code> — enabled, current state, "
                 "today's signal count\n"
                 "  • <code>/method on</code> — enable the runner\n"
                 "  • <code>/method off</code> — disable the runner\n"
                 "  • <code>/method reset</code> — clear in-flight state + "
                 "today's cooldown\n"
-                "  • <code>/method history</code> — last 10 signals")
+                "  • <code>/method history</code> — last 10 signals\n"
+                "  • <code>/method test</code> — fire a synthetic "
+                "TradingView webhook to self-test\n"
+                "  • <code>/method debug</code> — Databento data-source "
+                "health probe (legacy polling path)")
 
     sub = args[0].lower().strip()
     if sub == "status":
@@ -1162,20 +1168,24 @@ def _cmd_method(args: list) -> str:
         if not sheets.write_config("METHOD_ENABLED", "true"):
             return "❌ Could not save METHOD_ENABLED=true to Config tab."
         return ("✅ <b>Option method enabled</b>\n"
-                "Will start ticking on the next minute during US extended "
-                "hours (11:00–23:55 KSA, Mon–Fri).")
+                "TradingView webhook alerts will be honored. "
+                "(Polling path is dormant in Phase G.4.)")
     if sub == "off":
         if not sheets.write_config("METHOD_ENABLED", "false"):
             return "❌ Could not save METHOD_ENABLED=false to Config tab."
         return ("🔕 <b>Option method disabled</b>\n"
-                "Scheduled ticks will skip silently. Re-enable with "
-                "<code>/method on</code>.")
+                "TradingView webhooks will be rejected with HTTP 403. "
+                "Re-enable with <code>/method on</code>.")
     if sub == "reset":
         return _cmd_method_reset()
     if sub == "history":
         return _cmd_method_history()
+    if sub == "test":
+        return _cmd_method_test()
+    if sub == "debug":
+        return _cmd_method_debug()
     return (f"❌ Unknown subcommand: <code>{sub}</code>\n"
-            "Use: <code>/method status|on|off|reset|history</code>")
+            "Use: <code>/method status|on|off|reset|history|test|debug</code>")
 
 
 def _cmd_method_status() -> str:
@@ -1274,11 +1284,13 @@ def _cmd_method_reset() -> str:
             f"{suffix}")
 
 
-def _cmd_method_health() -> str:
-    """Manual data-source health probe for the option-method runner.
-    Hits Databento with the configured METHOD_TICKER + a 1m bar; never
-    called on a schedule. Used after Railway redeploys to confirm the
-    DATABENTO_API_KEY env var actually reached the container."""
+def _cmd_method_debug() -> str:
+    """`/method debug` — manual data-source health probe for the dormant
+    polling path. Hits Databento with the configured METHOD_TICKER + a
+    1m bar; never called on a schedule. Used after Railway redeploys
+    to confirm the DATABENTO_API_KEY env var actually reached the
+    container. Phase A: renamed from /method_health and folded into
+    the /method subcommand surface."""
     from config import METHOD_TICKER, DATABENTO_DATASET
     try:
         from core import databento_client
@@ -1311,12 +1323,15 @@ def _cmd_method_health() -> str:
 
 
 def _cmd_method_test() -> str:
-    """Phase G.4 — fire a synthetic pre_signal payload at our own
+    """`/method test` — fire a synthetic pre_signal payload at our own
     /webhook/tradingview endpoint to verify end-to-end wiring.
 
     Useful right after configuring TRADINGVIEW_WEBHOOK_SECRET on
     Railway: if the bot answers with a Telegram pre-signal alert
-    within a few seconds, the secret + dispatch path are correct."""
+    within a few seconds, the secret + dispatch path are correct.
+
+    Phase A: invoked via /method test subcommand (was top-level
+    /method_test before consolidation)."""
     from config import TRADINGVIEW_WEBHOOK_SECRET
     if not TRADINGVIEW_WEBHOOK_SECRET:
         return ("❌ <code>TRADINGVIEW_WEBHOOK_SECRET</code> not set. "
