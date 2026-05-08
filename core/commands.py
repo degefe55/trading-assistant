@@ -766,7 +766,11 @@ def _cmd_list() -> str:
             default=_default_watchlist(market), market=market
         )
         focus_rows = sheets.read_focus(market=market) or []
-        focus = [r.get("Ticker", "") for r in focus_rows if r.get("Ticker")]
+        # Coerce to str — gspread can return numeric tickers (Saudi
+        # codes like 1321) as int, which crashes downstream .upper()/
+        # .strip() calls and breaks /list rendering.
+        focus = [str(r.get("Ticker", "")) for r in focus_rows
+                 if r.get("Ticker") not in (None, "")]
 
         flag = "🇺🇸" if market == "US" else ("🇸🇦" if market == "SA" else "🌐")
         lines.append("")

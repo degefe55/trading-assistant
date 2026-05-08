@@ -504,7 +504,11 @@ def read_watchlist(default: list = None, market: str = "US") -> list:
     use WATCHLIST_<MARKET> (e.g. WATCHLIST_SA).
     """
     cfg = read_config() or {}
-    raw = (cfg.get(_watchlist_key(market)) or "").strip()
+    # gspread returns numeric-looking cells as int (e.g. a single Saudi
+    # ticker "1321" parses as 1321). Coerce to str at the boundary so
+    # downstream .strip()/.split() don't crash on AttributeError.
+    raw_val = cfg.get(_watchlist_key(market))
+    raw = str(raw_val).strip() if raw_val is not None else ""
     if not raw:
         return list(default or [])
     parts = [p.strip().upper() for p in raw.split(",") if p.strip()]
@@ -540,17 +544,17 @@ def add_focus(ticker: str, market: str = "US") -> dict:
     try:
         ws = ss.worksheet("Focus")
         records = ws.get_all_records()
-        # Filter to same market for limit-counting purposes
-        same_market = [r for r in records if r.get("Market", "US") == market]
-        # Already there?
-        if any(r.get("Ticker", "").upper() == ticker for r in records):
+        # Coerce Ticker/Market to str — gspread returns numeric tickers
+        # (Saudi codes like 1321) as int.
+        same_market = [r for r in records
+                       if str(r.get("Market", "US") or "US") == market]
+        if any(str(r.get("Ticker", "")).upper() == ticker
+               for r in records):
             return {"ok": False, "error": f"{ticker} is already in focus"}
         dropped = None
         if len(same_market) >= FOCUS_LIMIT:
-            # Find the OLDEST same-market entry (top of the list, after header)
             target = same_market[0]
-            target_ticker = target.get("Ticker", "")
-            # Find its row in the actual sheet to delete
+            target_ticker = str(target.get("Ticker", ""))
             cell = ws.find(target_ticker, in_column=1)
             if cell is not None:
                 ws.delete_rows(cell.row)
