@@ -1175,10 +1175,17 @@ def _validate_hhmm(s: str) -> bool:
 
 
 def _load_times_from_config() -> dict:
+    """Merge hard-coded brief times (US + SA) with any Config-tab
+    overrides keyed CONFIG_KEY_PREFIX + brief.upper().
+
+    Phase A — previously this only iterated DEFAULT_TIMES (US briefs),
+    which meant /settime preclose_sa 14:00 wrote a Config row that was
+    never read back. Now both families are honored."""
     times = dict(DEFAULT_TIMES)
+    times.update(DEFAULT_TIMES_SA)
     try:
         cfg = sheets.read_config()
-        for brief in DEFAULT_TIMES.keys():
+        for brief in list(DEFAULT_TIMES.keys()) + list(DEFAULT_TIMES_SA.keys()):
             key = f"{CONFIG_KEY_PREFIX}{brief.upper()}"
             val = cfg.get(key)
             if val and _validate_hhmm(str(val)):
@@ -1228,22 +1235,18 @@ def rebuild_schedule():
     with _scheduler_lock:
         schedule.clear()
 
-        # US briefs (existing)
+        # All brief times (US + SA) — Phase A: SA briefs now also pick
+        # up Config-tab overrides via _load_times_from_config. Jobs are
+        # always registered; the SA runner additionally gates on
+        # Sun-Thu + ACTIVE_MARKETS.
         times = _load_times_from_config()
         for brief, hhmm in times.items():
+            runner = (_scheduled_runner_sa if brief.endswith("_sa")
+                      else _scheduled_runner)
             schedule.every().day.at(hhmm, KSA_TZ_STR).do(
-                _scheduled_runner, brief
+                runner, brief
             ).tag(brief)
         _active_times = times
-
-        # Saudi briefs (Phase F). Times are hardcoded in DEFAULT_TIMES_SA
-        # — they're not configurable via the Config tab today; can be
-        # added later with a CONFIG_KEY_PREFIX_SA if needed. Jobs are
-        # always registered; the runner gates on Sun-Thu + ACTIVE_MARKETS.
-        for brief, hhmm in DEFAULT_TIMES_SA.items():
-            schedule.every().day.at(hhmm, KSA_TZ_STR).do(
-                _scheduled_runner_sa, brief
-            ).tag(brief)
 
         # Watcher jobs (Phase D.5 + Phase F). Two US ticks + two SA
         # ticks. All share _watcher_lock — on collision the later one
@@ -1304,9 +1307,11 @@ def rebuild_schedule():
                   f"Diagnostic agent: every 30m during US hours, "
                   f"enabled={DIAGNOSTIC_AGENT_ENABLED}")
 
+        us_times = {k: v for k, v in times.items() if not k.endswith("_sa")}
+        sa_times = {k: v for k, v in times.items() if k.endswith("_sa")}
         log_event("INFO", "scheduler",
-                  f"Rebuilt schedule: us_briefs={times}, "
-                  f"sa_briefs={DEFAULT_TIMES_SA}, watcher={intervals}, "
+                  f"Rebuilt schedule: us_briefs={us_times}, "
+                  f"sa_briefs={sa_times}, watcher={intervals}, "
                   f"method_polling={'off' if METHOD_RUNNER_DISABLED else method_sec}")
 
 

@@ -492,15 +492,17 @@ def _cmd_times() -> str:
         active = {}
 
     if not active:
-        from webhook.app import DEFAULT_TIMES, CONFIG_KEY_PREFIX
+        from webhook.app import (DEFAULT_TIMES, DEFAULT_TIMES_SA,
+                                  CONFIG_KEY_PREFIX)
         cfg = sheets.read_config() or {}
         active = {}
-        for brief, default in DEFAULT_TIMES.items():
-            active[brief] = cfg.get(f"{CONFIG_KEY_PREFIX}{brief.upper()}", default)
+        for brief, default in {**DEFAULT_TIMES, **DEFAULT_TIMES_SA}.items():
+            active[brief] = cfg.get(
+                f"{CONFIG_KEY_PREFIX}{brief.upper()}", default)
 
-    # SA brief times are hardcoded (no Config-tab overrides today). Pull
-    # them straight from webhook.app so /times stays consistent with what
-    # the scheduler actually fires.
+    # Phase A — SA times now live in _active_times (and pick up
+    # Config-tab overrides). DEFAULT_TIMES_SA is only used as a final
+    # fallback if _active_times is missing a key entirely.
     from webhook.app import DEFAULT_TIMES_SA
 
     label = {
@@ -524,20 +526,23 @@ def _cmd_times() -> str:
         for brief in ("premarket_sa", "midsession_sa",
                       "preclose_sa", "eod_sa"):
             short = brief.replace("_sa", "")
-            lines.append(f"  <code>{label[short]} "
-                         f"{DEFAULT_TIMES_SA.get(brief, '?')}</code>")
+            hhmm = active.get(brief) or DEFAULT_TIMES_SA.get(brief, '?')
+            lines.append(f"  <code>{label[short]} {hhmm}</code>")
         lines.append("  <i>Market hours: 10:00–15:00</i>")
 
     lines.append("")
-    lines.append("Change US times with: <code>/settime BRIEF HH:MM</code>")
+    lines.append("Change times with: <code>/settime BRIEF HH:MM</code>")
     return "\n".join(lines)
 
 
 def _cmd_settime(args: list) -> str:
     if len(args) < 2:
         return ("Usage: <code>/settime BRIEF HH:MM</code>\n"
-                "Briefs: premarket, midsession, preclose, eod\n"
-                "Example: <code>/settime preclose 22:45</code>")
+                "US briefs: premarket, midsession, preclose, eod\n"
+                "SA briefs: premarket_sa, midsession_sa, "
+                "preclose_sa, eod_sa\n"
+                "Example: <code>/settime preclose 22:45</code>\n"
+                "Example: <code>/settime preclose_sa 14:30</code>")
 
     brief = args[0].lower().strip()
     hhmm = args[1].strip()
@@ -570,8 +575,10 @@ def _cmd_settime(args: list) -> str:
         active = hhmm
 
     if rebuild_ok:
+        days = "Sun–Thu" if brief.endswith("_sa") else "Mon–Fri"
         return (f"✅ <b>Schedule updated</b>\n"
-                f"<code>{brief}</code> → <code>{active}</code> (KSA, Mon–Fri)\n\n"
+                f"<code>{brief}</code> → <code>{active}</code> "
+                f"(KSA, {days})\n\n"
                 f"Saved to Config tab.\n"
                 f"Send /times to see all.")
     else:
