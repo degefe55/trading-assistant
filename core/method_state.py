@@ -811,6 +811,30 @@ def handle_webhook_event(payload: dict) -> dict:
     return get_tracker().handle_webhook_event(payload)
 
 
+def get_market_direction() -> tuple:
+    """Derive a one-line market-direction summary from the tracker's
+    per-direction state. Returns (emoji_label, descriptor) — e.g.
+    ('📈 BULLISH', 'CALL setup active'). NEUTRAL when both directions
+    are idle (NO_SETUP/DONE).
+
+    Used by /method status and the /menu Method dashboard so they
+    can show the same one-liner."""
+    try:
+        snap = get_tracker().state_snapshot() or {}
+    except Exception as e:
+        log_event("WARN", "method",
+                  f"market_direction tracker read failed: {e}")
+        return ("⚪ NEUTRAL", "no setup")
+    active = (PRE_SIGNAL, TRACKING)
+    call_state = (snap.get("call") or {}).get("state", NO_SETUP)
+    put_state = (snap.get("put") or {}).get("state", NO_SETUP)
+    if call_state in active:
+        return ("📈 BULLISH", "CALL setup active")
+    if put_state in active:
+        return ("📉 BEARISH", "PUT setup active")
+    return ("⚪ NEUTRAL", "no setup")
+
+
 def get_today_counters() -> dict:
     """Tally today's MethodSignals activity per direction. Used by the
     /menu Method dashboard.

@@ -1212,9 +1212,13 @@ def _cmd_method_status() -> str:
     from config import TRADINGVIEW_WEBHOOK_SECRET
     secret_set = bool(TRADINGVIEW_WEBHOOK_SECRET)
 
+    from core import method_state as _ms
+    md_emoji, md_desc = _ms.get_market_direction()
+
     lines = ["<b>🎯 OPTION METHOD STATUS</b>", "─────────────"]
     lines.append(f"State: {'✅ ENABLED' if enabled else '🔕 DISABLED'}")
     lines.append("Mode: <code>webhook-driven (TradingView)</code>")
+    lines.append(f"Market: {md_emoji} ({md_desc})")
     lines.append(f"Webhook secret: "
                  f"{'✅ set' if secret_set else '⚠️ not set'}")
     lines.append(f"Ticker: <code>{PY_TICKER}</code>")

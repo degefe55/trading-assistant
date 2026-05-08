@@ -692,8 +692,10 @@ def render_method() -> tuple:
         snap = method_state.get_tracker().state_snapshot_rich()
         counters = method_state.get_today_counters()
         health = method_state.get_webhook_health()
+        md_emoji, md_desc = method_state.get_market_direction()
     except Exception as e:
         snap, counters, health = {}, {}, {}
+        md_emoji, md_desc = "⚪ NEUTRAL", "no setup"
         log_event("WARN", "menu",
                   f"method dashboard helper read failed: {e}")
 
@@ -723,6 +725,7 @@ def render_method() -> tuple:
         "─────────────",
         f"State: {'✅ ENABLED' if enabled else '🔕 DISABLED'}",
         "Mode: <code>webhook-driven (TradingView)</code>",
+        f"Market: {md_emoji} ({md_desc})",
         f"Webhook secret: "
         f"{'✅ set' if health.get('secret_set') else '⚠️ not set'}",
         f"Ticker: <code>{METHOD_TICKER}</code>",
