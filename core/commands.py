@@ -480,18 +480,38 @@ def _cmd_times() -> str:
         for brief, default in DEFAULT_TIMES.items():
             active[brief] = cfg.get(f"{CONFIG_KEY_PREFIX}{brief.upper()}", default)
 
-    lines = ["<b>🕒 Brief schedule (KSA, Mon–Fri)</b>",
-             "─────────────"]
+    # SA brief times are hardcoded (no Config-tab overrides today). Pull
+    # them straight from webhook.app so /times stays consistent with what
+    # the scheduler actually fires.
+    from webhook.app import DEFAULT_TIMES_SA
+
     label = {
-        "premarket":  "Pre-market   ",
-        "midsession": "Mid-session  ",
-        "preclose":   "Pre-close    ",
-        "eod":        "End of day   ",
+        "premarket":  "Pre-market  ",
+        "midsession": "Mid-session ",
+        "preclose":   "Pre-close   ",
+        "eod":        "End of day  ",
     }
-    for brief in ("premarket", "midsession", "preclose", "eod"):
-        lines.append(f"<code>{label[brief]} {active.get(brief, '?')}</code>")
+
+    lines = ["<b>🕒 Brief schedule (KSA)</b>", "─────────────"]
+
     lines.append("")
-    lines.append("Change with: <code>/settime BRIEF HH:MM</code>")
+    lines.append("<b>🇺🇸 US Market</b> <i>(Mon–Fri)</i>")
+    for brief in ("premarket", "midsession", "preclose", "eod"):
+        lines.append(f"  <code>{label[brief]} {active.get(brief, '?')}</code>")
+    lines.append("  <i>Market hours: 16:30–23:00</i>")
+
+    if "SA" in ACTIVE_MARKETS:
+        lines.append("")
+        lines.append("<b>🇸🇦 Saudi Market</b> <i>(Sun–Thu)</i>")
+        for brief in ("premarket_sa", "midsession_sa",
+                      "preclose_sa", "eod_sa"):
+            short = brief.replace("_sa", "")
+            lines.append(f"  <code>{label[short]} "
+                         f"{DEFAULT_TIMES_SA.get(brief, '?')}</code>")
+        lines.append("  <i>Market hours: 10:00–15:00</i>")
+
+    lines.append("")
+    lines.append("Change US times with: <code>/settime BRIEF HH:MM</code>")
     return "\n".join(lines)
 
 
