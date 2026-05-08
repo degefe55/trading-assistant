@@ -179,6 +179,18 @@ def read_focus(market: str = None) -> list:
         return []
 
 
+def is_paused() -> bool:
+    """Phase A — pause state lives in the Config tab as PAUSED=true|false.
+    Replaces the legacy /tmp/bot_paused.txt flag, which Railway wiped
+    on every redeploy and silently un-paused the bot. Defaults to
+    False if the cell is missing or unparseable."""
+    cfg = read_config() or {}
+    raw = cfg.get("PAUSED")
+    if raw is None or str(raw).strip() == "":
+        return False
+    return str(raw).strip().lower() == "true"
+
+
 def read_config() -> dict:
     """Return config as {setting: value} dict."""
     ss = _get_spreadsheet()

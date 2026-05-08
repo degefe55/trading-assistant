@@ -62,7 +62,10 @@ _LOOKBACK_BARS = 100
 
 
 def _is_paused() -> bool:
-    return os.path.exists(PAUSE_FILE)
+    # Phase A — pause state lives in the Config tab now.
+    # PAUSE_FILE constant is kept for legacy diagnostic purposes only.
+    from core import sheets
+    return sheets.is_paused()
 
 
 def _is_method_hours_now() -> bool:

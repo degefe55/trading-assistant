@@ -43,8 +43,11 @@ def main():
             _flush_logs_to_sheet()
             return 0
 
-        # Check if user paused scheduled briefs
-        if os.path.exists(PAUSE_FILE) and brief_type != "test":
+        # Check if user paused scheduled briefs.
+        # Phase A — authoritative source is the Config tab
+        # (sheets.is_paused). PAUSE_FILE constant kept for legacy
+        # diagnostics; do not check it here.
+        if sheets.is_paused() and brief_type != "test":
             log_event("INFO", "main", "Briefs paused by user, skipping")
             return 0
 

@@ -62,7 +62,10 @@ def _is_market_hours_now(market: str = "US") -> bool:
 
 
 def _is_paused() -> bool:
-    return os.path.exists(PAUSE_FILE)
+    # Phase A — pause state lives in the Config tab now.
+    # PAUSE_FILE constant is kept for legacy diagnostic purposes only.
+    from core import sheets
+    return sheets.is_paused()
 
 
 def _cancel_key(market: str) -> str:

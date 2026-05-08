@@ -1321,6 +1321,22 @@ except Exception as _e:
     print(f"ensure_logs_header at boot failed: {_e}", file=sys.stderr)
 
 
+# Phase A migration — if a legacy /tmp/bot_paused.txt exists from a
+# prior deploy AND the Config tab doesn't yet know we're paused, hoist
+# the file's state into the Sheet so we don't silently un-pause on the
+# first deploy with this code. Runs once at boot; no-op afterwards.
+try:
+    if os.path.exists("/tmp/bot_paused.txt"):
+        _cfg = sheets.read_config() or {}
+        if not _cfg.get("PAUSED"):
+            sheets.write_config("PAUSED", "true")
+            log_event("INFO", "startup",
+                      "Pause migration: hoisted /tmp/bot_paused.txt "
+                      "to Config PAUSED=true")
+except Exception as _e:
+    print(f"pause migration at boot failed: {_e}", file=sys.stderr)
+
+
 # Boot scheduler at import time so gunicorn launches it.
 start_scheduler()
 

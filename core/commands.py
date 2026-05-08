@@ -345,14 +345,30 @@ def _cmd_status() -> str:
 
 
 def _cmd_pause() -> str:
-    with open(PAUSE_FILE, "w") as f:
-        f.write(datetime.now(KSA_TZ).isoformat())
-    return "⏸️ <b>Briefs paused</b>\nScheduled briefs will not send. Use /resume to re-enable."
+    # Phase A — pause state is now in the Config tab so it survives
+    # Railway redeploys. The /tmp file is kept in sync as a transitional
+    # safety net for any reader that hasn't migrated yet.
+    if not sheets.write_config("PAUSED", "true"):
+        return "❌ Could not save PAUSED=true to Config tab."
+    try:
+        with open(PAUSE_FILE, "w") as f:
+            f.write(datetime.now(KSA_TZ).isoformat())
+    except Exception as e:
+        log_event("WARN", "commands",
+                  f"Pause /tmp mirror write failed (Sheet still wins): {e}")
+    return ("⏸️ <b>Briefs paused</b>\n"
+            "Scheduled briefs will not send. Use /resume to re-enable.")
 
 
 def _cmd_resume() -> str:
+    if not sheets.write_config("PAUSED", "false"):
+        return "❌ Could not save PAUSED=false to Config tab."
     if os.path.exists(PAUSE_FILE):
-        os.remove(PAUSE_FILE)
+        try:
+            os.remove(PAUSE_FILE)
+        except Exception as e:
+            log_event("WARN", "commands",
+                      f"Pause /tmp mirror remove failed (Sheet still wins): {e}")
     return "▶️ <b>Briefs resumed</b>\nScheduled briefs re-enabled."
 
 
@@ -1451,7 +1467,9 @@ def _cmd_method_history() -> str:
 
 
 def _is_paused() -> bool:
-    return os.path.exists(PAUSE_FILE)
+    # Phase A — authoritative source is the Config tab (sheets.is_paused).
+    # The /tmp file is no longer authoritative; do not check it here.
+    return sheets.is_paused()
 
 
 def _validate_hhmm(s: str) -> bool:
