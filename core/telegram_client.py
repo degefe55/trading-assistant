@@ -135,6 +135,41 @@ def get_updates(offset: int = 0) -> list:
         return []
 
 
+def edit_message_text(message_id: int, text: str,
+                      parse_mode: str = "HTML",
+                      disable_preview: bool = True,
+                      inline_keyboard: list = None) -> bool:
+    """Edit a previously-sent message in place. Used by the /menu UI to
+    swap screens on the same message instead of spawning new ones for
+    every tap.
+
+    Returns True on success, False on failure. Telegram will return an
+    error if the new text + markup are identical to the existing
+    message — that's logged at WARN and treated as success-with-noop
+    (the user already sees what we'd have rendered)."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not message_id:
+        return False
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": disable_preview,
+    }
+    if inline_keyboard is not None:
+        payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+    try:
+        r = requests.post(f"{TG_BASE}/editMessageText",
+                          json=payload, timeout=15)
+        if r.status_code == 400 and "message is not modified" in r.text:
+            return True
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        log_event("WARN", "telegram", f"editMessageText failed: {e}")
+        return False
+
+
 def answer_callback_query(callback_query_id: str, text: str = None,
                           show_alert: bool = False) -> bool:
     """Acknowledge a button tap so the user's button-spinner stops.

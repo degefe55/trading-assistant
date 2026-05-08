@@ -540,6 +540,15 @@ def _handle_callback_query(cb: dict):
     # Acknowledge fast — Telegram times out the spinner if we're slow
     telegram_client.answer_callback_query(cb_id, text="Loading…")
 
+    # Phase B — /menu inline-keyboard navigation. Try menu router first;
+    # if it claims the prefix (m: t: r: w: x: s: d:), we're done.
+    try:
+        from core import menu
+        if menu.handle_callback(data, parent_msg_id):
+            return jsonify({"ok": True, "menu": data[:40]}), 200
+    except Exception as e:
+        log_event("ERROR", "webhook", f"menu callback dispatch failed: {e}")
+
     # Route by prefix
     if data.startswith("deepdive:"):
         rec_id = data[len("deepdive:"):].strip()

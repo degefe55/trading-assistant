@@ -146,6 +146,8 @@ def _dispatch(text: str) -> str:
             return _cmd_trim_logs()
         if cmd == "/diagnose":
             return _cmd_diagnose(args)
+        if cmd == "/menu":
+            return _cmd_menu()
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -1486,6 +1488,20 @@ def _cmd_method_history() -> str:
         )
         lines.append(f"   <code>{sid}</code>")
     return "\n".join(lines)
+
+
+def _cmd_menu() -> str:
+    """Phase B — open the inline-keyboard /menu UI. Sends the message
+    directly (the dispatcher path doesn't carry inline_keyboard) and
+    returns "" so the dispatcher's `if reply` skips the second send."""
+    try:
+        from core import menu
+        text, kb = menu.render_main()
+        telegram_client.send_message(text, inline_keyboard=kb)
+    except Exception as e:
+        log_event("ERROR", "commands", f"/menu render failed: {e}")
+        return f"❌ /menu failed: <code>{e}</code>"
+    return ""
 
 
 def _is_paused() -> bool:

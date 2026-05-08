@@ -25,6 +25,21 @@ from core import sheets, telegram_client, claude_client
 from core.logger import log_event
 
 
+def is_diagnostic_enabled() -> bool:
+    """Phase B — Sheet-config wins, env fallback. Mirrors the
+    method/watcher pattern so the /menu Toggles screen can flip
+    DIAGNOSTIC_AGENT_ENABLED at runtime."""
+    try:
+        cfg = sheets.read_config() or {}
+        raw = cfg.get("DIAGNOSTIC_AGENT_ENABLED")
+        if raw is not None and str(raw).strip() != "":
+            return str(raw).strip().lower() == "true"
+    except Exception as e:
+        log_event("WARN", "log_analyst",
+                  f"Config read failed; falling back to env: {e}")
+    return DIAGNOSTIC_AGENT_ENABLED
+
+
 # Defaults — tunable via the function args (manual /diagnose uses 60m).
 WINDOW_MINUTES = 15
 PATTERN_THRESHOLD = 10
@@ -71,7 +86,7 @@ def run_log_analyst_tick(window_minutes: int = WINDOW_MINUTES,
     Returns a status dict for diagnostics:
       {ran, rows, filtered, patterns, alerted, error?}
     """
-    if source != "manual" and not DIAGNOSTIC_AGENT_ENABLED:
+    if source != "manual" and not is_diagnostic_enabled():
         return {"ran": False, "skipped": "disabled"}
 
     try:
