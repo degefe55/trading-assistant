@@ -271,6 +271,17 @@ def tradingview_webhook():
                   "rejected: secret mismatch")
         return jsonify({"ok": False, "error": "forbidden"}), 403
 
+    # Phase A — honor the same enable flag the polling path used. Without
+    # this, /method off didn't actually silence anything; TradingView
+    # would still fire and the bot would still alert.
+    from core import method_runner
+    if not method_runner.is_method_enabled():
+        event = str(payload.get("event", "")).strip().lower() or "unknown"
+        log_event("INFO", "method",
+                  f"Webhook payload rejected: METHOD_ENABLED=false "
+                  f"(event={event})")
+        return jsonify({"ok": False, "error": "method_disabled"}), 403
+
     # Strip the secret before handing off — no need to keep it in the
     # background thread or any logged structures.
     safe_payload = {k: v for k, v in payload.items() if k != "secret"}
@@ -1339,6 +1350,17 @@ except Exception as _e:
 
 # Boot scheduler at import time so gunicorn launches it.
 start_scheduler()
+
+
+# Phase A — log the live state of the method webhook gate at boot so a
+# reader of the Railway logs can immediately see whether TradingView
+# alerts will be honored. Best-effort: never blocks boot.
+try:
+    from core import method_runner as _mr
+    log_event("INFO", "startup",
+              f"Method webhook gate: METHOD_ENABLED={_mr.is_method_enabled()}")
+except Exception as _e:
+    print(f"Method gate startup log failed: {_e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

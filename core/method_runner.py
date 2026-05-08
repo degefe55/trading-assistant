@@ -76,10 +76,14 @@ def _is_method_hours_now() -> bool:
     return METHOD_OPEN_KSA <= t <= METHOD_CLOSE_KSA
 
 
-def _resolve_enabled() -> bool:
+def is_method_enabled() -> bool:
     """Sheet-config wins; Python const is the fallback. Mirrors the
     watcher pattern (so /method on writes Config, takes effect on the
-    next tick)."""
+    next tick).
+
+    Public so the webhook handler can gate /webhook/tradingview on the
+    same flag — without this, /method off only stops the dormant
+    polling path and TradingView alerts keep firing."""
     try:
         cfg = sheets.read_config() or {}
         raw = cfg.get("METHOD_ENABLED")
@@ -108,7 +112,7 @@ def run_method_tick() -> dict:
             _last_skip_state = reason
 
     # Gate 1: enabled?
-    if not _resolve_enabled():
+    if not is_method_enabled():
         _log_skip_once("disabled")
         return {"ran": False, "skipped_reason": "disabled"}
 
