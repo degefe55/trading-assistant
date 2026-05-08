@@ -285,6 +285,38 @@ def trim_logs_if_needed() -> dict:
     return {"trimmed": True, "deleted": deleted, "remaining": remaining}
 
 
+def read_recent_logs(limit: int = 200) -> list:
+    """Return up to `limit` most recent rows from the Logs tab as
+    {column: value} dicts. Cheap alternative to get_all_records() when
+    the tab has tens of thousands of rows — uses a single ranged read
+    for the tail of the sheet.
+
+    Padded for empty trailing cells. Skips the header row. Some of the
+    returned rows may be blanks (for sheets where row_count exceeds the
+    populated row count); callers should filter on Timestamp themselves.
+    """
+    ss = _get_spreadsheet()
+    if ss is None or limit <= 0:
+        return []
+    try:
+        ws = ss.worksheet("Logs")
+        total = ws.row_count
+        if total <= 1:
+            return []
+        end_col = _col_letter(len(LOGS_HEADER))
+        start = max(2, total - limit + 1)
+        rng = f"A{start}:{end_col}{total}"
+        values = ws.get(rng) or []
+        out = []
+        for row in values:
+            padded = list(row) + [""] * (len(LOGS_HEADER) - len(row))
+            out.append({h: padded[i] for i, h in enumerate(LOGS_HEADER)})
+        return out
+    except Exception as e:
+        log_event("WARN", "sheets", f"read_recent_logs failed: {e}")
+        return []
+
+
 def ensure_logs_header() -> bool:
     """Verify row 1 of the Logs tab is the canonical LOGS_HEADER, and
     rewrite it if not. Run once at boot — drifted/missing headers cause

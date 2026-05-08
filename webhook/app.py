@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, time as dtime
 
 import requests
 import schedule
@@ -54,7 +54,7 @@ from core.logger import log_event, get_log_buffer
 from config import (TELEGRAM_CHAT_ID, KSA_TZ, ACTIVE_MARKETS,
                     WATCHER_PRICE_INTERVAL_MIN, WATCHER_NEWS_INTERVAL_MIN,
                     METHOD_INTERVAL_SEC, TRADINGVIEW_WEBHOOK_SECRET,
-                    MAX_LOG_ROWS)
+                    MAX_LOG_ROWS, DIAGNOSTIC_AGENT_ENABLED)
 import main as bot_main
 
 
@@ -1051,6 +1051,72 @@ def _scheduled_trim_logs():
     _spawn_trim_logs(source="schedule")
 
 
+# ---------------------------------------------------------------------------
+# Phase G.5 — diagnostic Haiku agent
+# ---------------------------------------------------------------------------
+
+# US market window in KSA — diagnostic agent only runs while the US
+# session is open since that's when most of the bot's traffic happens.
+# Outside this window we'd just be paying for Haiku noise.
+_LOG_ANALYST_OPEN_KSA = dtime(16, 30)
+_LOG_ANALYST_CLOSE_KSA = dtime(23, 0)
+
+
+def _spawn_log_analyst_tick(source: str,
+                            window_minutes: int = None) -> tuple:
+    """Run one diagnostic-agent pass in a daemon thread. Returns
+    (spawned: bool, reason: str). The agent itself wraps the tick in
+    try/except, but we belt-and-suspenders here too — a crash in the
+    agent must never take down the scheduler thread."""
+    def _runner():
+        try:
+            try:
+                from core import log_analyst
+                if window_minutes is not None:
+                    log_analyst.run_log_analyst_tick(
+                        window_minutes=window_minutes, source=source)
+                else:
+                    log_analyst.run_log_analyst_tick(source=source)
+            except Exception as e:
+                err = (f"log_analyst tick crashed: {e}\n"
+                       f"{traceback.format_exc()}")
+                log_event("ERROR", "log_analyst", err)
+                try:
+                    telegram_client.send_error_alert(err[:1500])
+                except Exception:
+                    pass
+        finally:
+            try:
+                buf = get_log_buffer()
+                if buf:
+                    sheets.append_logs(buf)
+            except Exception as e:
+                print(f"log_analyst log flush failed: {e}",
+                      file=sys.stderr)
+
+    try:
+        t = threading.Thread(target=_runner, daemon=True,
+                             name="log-analyst")
+        t.start()
+    except Exception as e:
+        log_event("ERROR", "log_analyst",
+                  f"thread start failed: {e}")
+        return False, f"thread start failed: {e}"
+    return True, "spawned"
+
+
+def _scheduled_log_analyst_runner():
+    """Cron entry point for the diagnostic agent — every 30 min, weekday
+    + US-market-hours gated. The agent itself also checks
+    DIAGNOSTIC_AGENT_ENABLED before doing any work."""
+    if not _is_weekday_ksa():
+        return
+    t = datetime.now(KSA_TZ).time()
+    if not (_LOG_ANALYST_OPEN_KSA <= t <= _LOG_ANALYST_CLOSE_KSA):
+        return
+    _spawn_log_analyst_tick(source="schedule")
+
+
 def _scheduled_method_runner():
     """Cron entry point for the option-method runner. Runs every
     METHOD_INTERVAL_SEC seconds; the runner itself re-gates on
@@ -1215,6 +1281,17 @@ def rebuild_schedule():
         schedule.every(6).hours.do(_scheduled_trim_logs).tag("trim_logs")
         log_event("INFO", "scheduler",
                   f"Log rotation enabled, cap={MAX_LOG_ROWS} rows")
+
+        # Phase G.5 — diagnostic Haiku agent. Runs every 30 min during
+        # US session; the runner itself re-gates on weekday + market
+        # hours and on DIAGNOSTIC_AGENT_ENABLED, so we register the job
+        # unconditionally and let the runtime gates decide.
+        schedule.every(30).minutes.do(
+            _scheduled_log_analyst_runner
+        ).tag("log_analyst")
+        log_event("INFO", "scheduler",
+                  f"Diagnostic agent: every 30m during US hours, "
+                  f"enabled={DIAGNOSTIC_AGENT_ENABLED}")
 
         log_event("INFO", "scheduler",
                   f"Rebuilt schedule: us_briefs={times}, "

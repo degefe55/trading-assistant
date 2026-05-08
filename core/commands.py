@@ -150,6 +150,8 @@ def _dispatch(text: str) -> str:
             return _cmd_method_test()
         if cmd == "/trim_logs":
             return _cmd_trim_logs()
+        if cmd == "/diagnose":
+            return _cmd_diagnose(args)
         return f"Unknown command: {cmd}\nSend /help for available commands."
     except Exception as e:
         log_event("ERROR", "commands", f"Command {cmd} failed: {e}")
@@ -1336,6 +1338,45 @@ def _cmd_method_test() -> str:
             f"Body: <code>{body}</code>\n\n"
             f"<i>If accepted, a synthetic CALL pre-signal Telegram "
             f"alert should arrive shortly.</i>")
+
+
+def _cmd_diagnose(args: list) -> str:
+    """Run the diagnostic Haiku agent on demand. Same logic as the
+    30-min cron tick but with a wider default window (60m) so a single
+    /diagnose covers the time since the last scheduled tick.
+
+    Optional first arg overrides the window in minutes, e.g.
+    <code>/diagnose 240</code> to look back 4 hours."""
+    window = 60
+    if args:
+        try:
+            n = int(args[0])
+            if 1 <= n <= 1440:
+                window = n
+        except (ValueError, TypeError):
+            return ("Usage: <code>/diagnose [WINDOW_MINUTES]</code>\n"
+                    "Default 60 min. Range 1–1440. "
+                    "Example: <code>/diagnose 240</code>")
+
+    try:
+        from core import log_analyst
+        result = log_analyst.diagnose_now(window_minutes=window)
+    except Exception as e:
+        return f"❌ /diagnose crashed: <code>{e}</code>"
+
+    if not result.get("ran"):
+        reason = result.get("error") or result.get("skipped") or "unknown"
+        return f"⚠️ /diagnose did not run: <code>{reason}</code>"
+
+    rows = result.get("rows", 0)
+    filtered = result.get("filtered", 0)
+    patterns = result.get("patterns", 0)
+    alerted = result.get("alerted", 0)
+    return (f"🔎 <b>Diagnose ({window}m window)</b>\n"
+            f"Logs scanned: <code>{rows}</code>\n"
+            f"WARN/ERROR in window: <code>{filtered}</code>\n"
+            f"Patterns ≥10: <code>{patterns}</code>\n"
+            f"Alerts sent (fresh this hour): <code>{alerted}</code>")
 
 
 def _cmd_trim_logs() -> str:

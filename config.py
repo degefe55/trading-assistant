@@ -48,6 +48,13 @@ MONTHLY_COST_CAP_USD = float(os.getenv("MONTHLY_COST_CAP_USD", "10.00"))
 # the rest of the sheet.
 MAX_LOG_ROWS = int(os.getenv("MAX_LOG_ROWS", "50000"))
 
+# Diagnostic Haiku agent (Phase G.5). Scans the Logs tab every 30 min
+# during US market hours, groups recurring ERROR/WARN messages, and
+# alerts via Telegram with a Haiku-generated summary + likely cause.
+# Expected spend ≈ $1.50/mo at the default 30-min cadence.
+DIAGNOSTIC_AGENT_ENABLED = os.getenv("DIAGNOSTIC_AGENT_ENABLED",
+                                     "true").lower() == "true"
+
 # ============================================================
 # CURRENCY
 # ============================================================
