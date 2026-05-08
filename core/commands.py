@@ -1263,75 +1263,31 @@ def _cmd_method_debug() -> str:
     """`/method debug` — TradingView webhook health probe.
 
     Replaced the legacy Databento polling-path health check (Phase G.4
-    moved the option method to webhooks; the Databento check was
-    measuring something that no longer mattered). Now reports:
-
-      - Last webhook received timestamp (newest Logs row from
-        webhook_tv or method modules)
-      - Last alert delivered (most recent MethodSignals row)
-      - Webhook secret + METHOD_ENABLED state
-      - 24h health verdict
-    """
-    from datetime import timedelta
-    from config import TRADINGVIEW_WEBHOOK_SECRET
-    from core import method_runner
-
-    secret_set = bool(TRADINGVIEW_WEBHOOK_SECRET)
-    method_on = method_runner.is_method_enabled()
-
-    last_webhook_row = sheets.get_last_log_row(module="webhook_tv") or {}
-    last_method_row = sheets.get_last_log_row(module="method") or {}
-
-    def _ts(row):
-        return str(row.get("Timestamp", "") or "").strip()
-
-    ts_w = _ts(last_webhook_row)
-    ts_m = _ts(last_method_row)
-    last_received = max(ts_w, ts_m) if (ts_w or ts_m) else ""
-
-    rows = sheets.read_method_signals(limit=1) or []
-    last_signal = rows[0] if rows else {}
-    last_signal_at = ""
-    if last_signal:
-        d = str(last_signal.get("Date", "") or "").strip()
-        t = str(last_signal.get("Time_KSA", "") or "").strip()
-        last_signal_at = f"{d} {t}".strip()
-    last_signal_id = str(last_signal.get("SignalID", "") or "").strip() or "—"
-
-    healthy_24h = False
-    age_str = "—"
-    if last_received:
-        try:
-            ts = datetime.strptime(last_received[:19],
-                                   "%Y-%m-%d %H:%M:%S").replace(tzinfo=KSA_TZ)
-            delta = datetime.now(KSA_TZ) - ts
-            healthy_24h = delta < timedelta(hours=24)
-            mins = int(delta.total_seconds() // 60)
-            if mins < 60:
-                age_str = f"{mins}m ago"
-            elif mins < 1440:
-                age_str = f"{mins // 60}h ago"
-            else:
-                age_str = f"{mins // 1440}d ago"
-        except (ValueError, TypeError):
-            pass
+    moved the option method to webhooks). Reads everything from the
+    shared `method_state.get_webhook_health()` helper so this surface
+    and the /menu Method dashboard never drift."""
+    from core import method_state
+    h = method_state.get_webhook_health()
 
     lines = ["<b>🩺 METHOD WEBHOOK HEALTH</b>", "─────────────"]
     lines.append("Mode: <code>webhook-driven (TradingView)</code>")
     lines.append(f"METHOD_ENABLED: "
-                 f"{'✅ true' if method_on else '🔕 false'}")
+                 f"{'✅ true' if h['method_enabled'] else '🔕 false'}")
     lines.append(f"Webhook secret:  "
-                 f"{'✅ set' if secret_set else '⚠️ not set'}")
+                 f"{'✅ set' if h['secret_set'] else '⚠️ not set'}")
     lines.append("")
+    last_received = h["last_received"]
+    age = h["last_received_age"]
     lines.append(f"Last webhook seen:    "
                  f"<code>{last_received or '—'}</code>"
-                 + (f"  ({age_str})" if last_received else ""))
+                 + (f"  ({age})" if last_received and age else ""))
     lines.append(f"Last alert delivered: "
-                 f"<code>{last_signal_at or '—'}</code>")
-    if last_signal_id != "—":
-        lines.append(f"Last SignalID:        <code>{last_signal_id}</code>")
+                 f"<code>{h['last_signal_at'] or '—'}</code>")
+    if h["last_signal_id"]:
+        lines.append(f"Last SignalID:        "
+                     f"<code>{h['last_signal_id']}</code>")
     lines.append("")
-    if healthy_24h:
+    if h["healthy_24h"]:
         lines.append("Status: ✅ <b>healthy</b> "
                      "— webhook received in the last 24h")
     elif last_received:

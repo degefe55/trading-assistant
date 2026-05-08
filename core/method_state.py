@@ -117,6 +117,22 @@ class MethodSignalTracker:
             for d, v in self._dirs.items()
         }
 
+    def state_snapshot_rich(self) -> dict:
+        """Like state_snapshot but also includes the trigger/stop/tp1
+        from the in-memory row, when present. Used by /menu Method
+        dashboard for the 'CALL: PRE_SIGNAL @ 7232.50' lines."""
+        out = {}
+        for d, v in self._dirs.items():
+            row = v.get("row") or {}
+            out[d] = {
+                "state": v["state"],
+                "signal_id": v["signal_id"],
+                "trigger": row.get("TriggerPrice"),
+                "stop": row.get("StopPrice"),
+                "tp1": row.get("TP1"),
+            }
+        return out
+
     def force_reset(self):
         """In-memory wipe. Caller (e.g. /method reset) is responsible
         for the sheet-side reset_method_signals_active call."""
@@ -793,6 +809,124 @@ def handle_webhook_event(payload: dict) -> dict:
         log_event("WARN", "method", "webhook payload not a dict")
         return {"ok": False, "error": "payload not dict"}
     return get_tracker().handle_webhook_event(payload)
+
+
+def get_today_counters() -> dict:
+    """Tally today's MethodSignals activity per direction. Used by the
+    /menu Method dashboard.
+
+    Returns:
+        {
+          "call": {"setups": N, "entries": N, "tp1_hits": N,
+                   "tp2_hits": N, "tp3_hits": N, "invalidations": N},
+          "put":  {... same shape ...},
+        }
+
+    Reads up to 200 most-recent rows (bounded by daily cap of
+    METHOD_MAX_DAILY_SIGNALS × 2 directions) and filters by today's
+    Date. Counters use the row state, not the strict event sequence —
+    e.g. a row that reached TRACKING is counted as both a setup and
+    an entry."""
+    today = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
+    rows = sheets.read_method_signals(limit=200) or []
+    out = {"call": {"setups": 0, "entries": 0,
+                    "tp1_hits": 0, "tp2_hits": 0, "tp3_hits": 0,
+                    "invalidations": 0},
+           "put":  {"setups": 0, "entries": 0,
+                    "tp1_hits": 0, "tp2_hits": 0, "tp3_hits": 0,
+                    "invalidations": 0}}
+    for r in rows:
+        if str(r.get("Date", "")).strip() != today:
+            continue
+        d = str(r.get("Direction", "")).strip().lower()
+        if d not in out:
+            continue
+        out[d]["setups"] += 1
+        state = str(r.get("State", "")).strip().upper()
+        # Anything that reached TRACKING (now or later) was an entry —
+        # a row currently in DONE state may have been TRACKING before
+        # being closed. Use TP/Invalidation flags as proxy for "did
+        # this signal advance past PRE_SIGNAL".
+        tp1_hit = str(r.get("TP1Hit", "")).strip().upper() == "TRUE"
+        tp2_hit = str(r.get("TP2Hit", "")).strip().upper() == "TRUE"
+        tp3_hit = str(r.get("TP3Hit", "")).strip().upper() == "TRUE"
+        invalidated = bool(str(r.get("InvalidatedAt", "")).strip())
+        if state == "TRACKING" or tp1_hit or tp2_hit or tp3_hit \
+                or invalidated:
+            out[d]["entries"] += 1
+        if tp1_hit: out[d]["tp1_hits"] += 1
+        if tp2_hit: out[d]["tp2_hits"] += 1
+        if tp3_hit: out[d]["tp3_hits"] += 1
+        if invalidated: out[d]["invalidations"] += 1
+    return out
+
+
+def get_webhook_health() -> dict:
+    """Shared by /method debug and the /menu Method dashboard. Returns
+    a dict with last-webhook + last-alert timestamps, the 24h verdict,
+    and the current toggle / secret state. Single source of truth so
+    the two surfaces never drift."""
+    from datetime import timedelta
+    from config import TRADINGVIEW_WEBHOOK_SECRET
+    from core import method_runner
+
+    secret_set = bool(TRADINGVIEW_WEBHOOK_SECRET)
+    method_on = method_runner.is_method_enabled()
+
+    last_webhook_row = sheets.get_last_log_row(module="webhook_tv") or {}
+    last_method_row = sheets.get_last_log_row(module="method") or {}
+
+    def _ts(row):
+        return str(row.get("Timestamp", "") or "").strip()
+
+    ts_w = _ts(last_webhook_row)
+    ts_m = _ts(last_method_row)
+    last_received = max(ts_w, ts_m) if (ts_w or ts_m) else ""
+
+    rows = sheets.read_method_signals(limit=1) or []
+    last_signal = rows[0] if rows else {}
+    last_signal_at = ""
+    if last_signal:
+        d = str(last_signal.get("Date", "") or "").strip()
+        t = str(last_signal.get("Time_KSA", "") or "").strip()
+        last_signal_at = f"{d} {t}".strip()
+    last_signal_id = (str(last_signal.get("SignalID", "") or "").strip()
+                      or "")
+    last_signal_dir = (str(last_signal.get("Direction", "") or "")
+                       .strip().upper())
+    last_signal_trigger = str(last_signal.get("TriggerPrice", "")
+                              or "").strip()
+
+    healthy_24h = False
+    age_str = ""
+    if last_received:
+        try:
+            ts = datetime.strptime(
+                last_received[:19],
+                "%Y-%m-%d %H:%M:%S").replace(tzinfo=KSA_TZ)
+            delta = datetime.now(KSA_TZ) - ts
+            healthy_24h = delta < timedelta(hours=24)
+            mins = int(delta.total_seconds() // 60)
+            if mins < 60:
+                age_str = f"{mins}m ago"
+            elif mins < 1440:
+                age_str = f"{mins // 60}h ago"
+            else:
+                age_str = f"{mins // 1440}d ago"
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "secret_set": secret_set,
+        "method_enabled": method_on,
+        "last_received": last_received,
+        "last_received_age": age_str,
+        "healthy_24h": healthy_24h,
+        "last_signal_at": last_signal_at,
+        "last_signal_id": last_signal_id,
+        "last_signal_dir": last_signal_dir,
+        "last_signal_trigger": last_signal_trigger,
+    }
 
 
 # ---------------------------------------------------------------------------

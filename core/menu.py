@@ -681,46 +681,103 @@ def open_watchlist(message_id: int, toast: str = None) -> dict:
 # ============================================================
 
 def render_method() -> tuple:
-    """Live method dashboard. Mirrors /method status as a panel +
-    buttons mapping to the existing /method subcommands."""
+    """Live method dashboard — webhook health, current per-direction
+    state with trigger price, today's per-counter activity. Buttons
+    map 1:1 to /method subcommands so the slash and menu surfaces
+    stay interchangeable."""
     enabled = _method_enabled()
-    secret_set = bool(TRADINGVIEW_WEBHOOK_SECRET)
-
-    today_str = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
-    cd_call = sheets.read_method_cooldown(today_str, "call") or {}
-    cd_put = sheets.read_method_cooldown(today_str, "put") or {}
 
     try:
         from core import method_state
-        snap = method_state.get_tracker().state_snapshot()
+        snap = method_state.get_tracker().state_snapshot_rich()
+        counters = method_state.get_today_counters()
+        health = method_state.get_webhook_health()
     except Exception as e:
-        snap = {}
+        snap, counters, health = {}, {}, {}
         log_event("WARN", "menu",
-                  f"method dashboard tracker snapshot failed: {e}")
+                  f"method dashboard helper read failed: {e}")
+
+    def _fmt_num(v):
+        try:
+            return f"{float(v):.2f}"
+        except (ValueError, TypeError):
+            return str(v) if v not in (None, "") else "—"
 
     def _fmt_dir(d):
         s = snap.get(d, {})
-        return f"{s.get('state', '—')} ({s.get('signal_id') or '—'})"
+        state = s.get("state", "—") or "—"
+        sig = s.get("signal_id") or ""
+        trig = s.get("trigger")
+        if state in ("PRE_SIGNAL", "TRACKING") and trig not in (None, ""):
+            return f"{state} @ <code>{_fmt_num(trig)}</code>"
+        if state == "NO_SETUP" or not sig:
+            return "<i>idle</i>"
+        return state
+
+    cap = METHOD_MAX_DAILY_SIGNALS
+    cc = counters.get("call", {}) if counters else {}
+    cp = counters.get("put", {}) if counters else {}
 
     text_lines = [
         "<b>🎯 METHOD</b>",
         "─────────────",
         f"State: {'✅ ENABLED' if enabled else '🔕 DISABLED'}",
         "Mode: <code>webhook-driven (TradingView)</code>",
-        f"Webhook secret: {'✅ set' if secret_set else '⚠️ not set'}",
+        f"Webhook secret: "
+        f"{'✅ set' if health.get('secret_set') else '⚠️ not set'}",
         f"Ticker: <code>{METHOD_TICKER}</code>",
-        f"Daily cap: <code>{METHOD_MAX_DAILY_SIGNALS}</code> per direction",
+        f"Daily cap: <code>{cap}</code> per direction",
+        "",
+        "<b>📡 Webhook activity</b>",
+    ]
+    last_recv = health.get("last_received") or ""
+    age = health.get("last_received_age") or ""
+    text_lines.append(
+        f"  Last webhook: <code>{last_recv or '—'}</code>"
+        + (f" ({age})" if last_recv and age else "")
+    )
+    last_alert_at = health.get("last_signal_at") or ""
+    last_dir = health.get("last_signal_dir") or ""
+    last_trig = health.get("last_signal_trigger") or ""
+    if last_alert_at:
+        suffix = ""
+        if last_dir or last_trig:
+            bits = []
+            if last_dir: bits.append(last_dir)
+            if last_trig: bits.append(f"@ {_fmt_num(last_trig)}")
+            suffix = f" ({' '.join(bits)})"
+        text_lines.append(f"  Last alert:   <code>{last_alert_at}</code>"
+                          f"{suffix}")
+    else:
+        text_lines.append("  Last alert:   <code>—</code>")
+    if health.get("healthy_24h"):
+        text_lines.append("  Status: ✅ <b>healthy</b> "
+                          "(webhook in last 24h)")
+    elif last_recv:
+        text_lines.append("  Status: ⚠️ <b>no webhooks in 24h+</b>")
+    else:
+        text_lines.append("  Status: ⚠️ <b>no webhook activity</b>")
+
+    text_lines.extend([
         "",
         "<b>📊 Direction state</b>",
-        f"  CALL: <code>{_fmt_dir('call')}</code>",
-        f"  PUT:  <code>{_fmt_dir('put')}</code>",
+        f"  CALL: {_fmt_dir('call')}",
+        f"  PUT:  {_fmt_dir('put')}",
         "",
-        "<b>📅 Today's setup count</b>",
-        f"  CALL: {cd_call.get('SetupCount', 0) or 0}/"
-        f"{METHOD_MAX_DAILY_SIGNALS}",
-        f"  PUT:  {cd_put.get('SetupCount', 0) or 0}/"
-        f"{METHOD_MAX_DAILY_SIGNALS}",
-    ]
+        "<b>📅 Today's activity</b>",
+        f"  Setups:        CALL {cc.get('setups', 0)}/{cap} · "
+        f"PUT {cp.get('setups', 0)}/{cap}",
+        f"  Entries:       CALL {cc.get('entries', 0)} · "
+        f"PUT {cp.get('entries', 0)}",
+        f"  TP1 hits:      CALL {cc.get('tp1_hits', 0)} · "
+        f"PUT {cp.get('tp1_hits', 0)}",
+        f"  TP2 hits:      CALL {cc.get('tp2_hits', 0)} · "
+        f"PUT {cp.get('tp2_hits', 0)}",
+        f"  TP3 hits:      CALL {cc.get('tp3_hits', 0)} · "
+        f"PUT {cp.get('tp3_hits', 0)}",
+        f"  Invalidations: CALL {cc.get('invalidations', 0)} · "
+        f"PUT {cp.get('invalidations', 0)}",
+    ])
 
     toggle_cb = "x:off" if enabled else "x:on"
     toggle_text = ("🔕 Disable method" if enabled
