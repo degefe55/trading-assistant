@@ -162,70 +162,43 @@ def _cmd_start() -> str:
 def _cmd_help() -> str:
     return ("""<b>📚 Commands</b>
 
-<b>Trades</b>
+👉 <b>Tap /menu for the button-driven UI.</b>
+Slash commands below are for power users / typed input.
+
+<b>Trades</b>  (typed only — needs args)
 <code>/buy TICKER SHARES PRICE</code>
 <code>/sell TICKER SHARES PRICE</code>
-
-<b>Status</b>
 /pnl — current P&amp;L snapshot
-/status — bot health check
-/times — show brief schedule
-
-<b>Manual briefs</b>
-/run — show /run options + fire a brief
-<code>/run premarket</code>
-<code>/run midsession</code>
-<code>/run preclose</code>
-<code>/run eod</code>
-<code>/cancel BRIEF</code> — stop a running brief
-Example: <code>/cancel premarket</code>
-
-<b>Follow-up questions</b>
-<code>/ask RecID question</code>
-Example: <code>/ask 20260430-1530-PRE-SPWO why SELL?</code>
-Or: tap a ticker button on a brief, or reply directly to a brief.
 
 <b>Watchlist &amp; focus</b>
+<code>/watch TICKER</code> · <code>/unwatch TICKER</code>
+<code>/focus TICKER</code> · <code>/unfocus TICKER</code>
 /list — show watchlist + focus
-<code>/watch TICKER</code> — add to watchlist
-<code>/unwatch TICKER</code> — remove from watchlist
-<code>/focus TICKER</code> — promote to focus (max 3)
-<code>/unfocus TICKER</code> — remove from focus
 
-<b>Schedule</b>
-<code>/settime BRIEF HH:MM</code> — change brief time
-Example: <code>/settime preclose 22:45</code>
-Example: <code>/settime preclose_sa 14:30</code>
+<b>Briefs</b>
+/run — show options + fire a brief
+<code>/cancel BRIEF</code> — stop a running brief
+<code>/settime BRIEF HH:MM</code> — change schedule
+  Examples: <code>/settime preclose 22:45</code> · <code>/settime preclose_sa 14:30</code>
 
-<b>Watcher (always-on)</b>
-/watcher status — last ticks + today's alerts
-/watcher on — enable watcher
-/watcher off — disable watcher
+<b>Method (TradingView webhook)</b>
+/method — subcommand router
+  <code>status · on · off · reset · history · test · debug</code>
 
-<b>Option method (Phase G)</b>
-/method status — runner state + per-direction state + today's count
-/method on — enable (TradingView webhooks honored)
-/method off — disable (webhooks return 403)
-/method reset — clear in-flight state + today's cooldown
-/method history — last 10 signals
-/method test — fire a synthetic webhook to self-test
-/method debug — Databento data-source health (legacy polling path)
+<b>Watcher</b>
+/watcher status|on|off
 
-<b>Markets</b>
-/markets — show ACTIVE_MARKETS + data-source health
+<b>Status</b>
+/status · /times · /markets
+
+<b>Follow-up</b>
+<code>/ask RecID question</code> — or just reply to a brief
 
 <b>Diagnostics</b>
-<code>/diagnose [WINDOW_MIN]</code> — scan Logs for error patterns (default 60m)
-/trim_logs — manually cap the Logs tab
+<code>/diagnose [MIN]</code> · /trim_logs
 
 <b>Control</b>
-/pause — silence scheduled briefs (persists in Sheet)
-/resume — re-enable briefs
-/help — this menu
-
-<b>Trade examples</b>
-<code>/buy SPWO 10 31.40</code>
-<code>/sell SPWO 5 31.80</code>""")
+/pause · /resume · /menu · /help""")
 
 
 def _cmd_buy(args: list) -> str:

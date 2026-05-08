@@ -770,6 +770,55 @@ def open_method(message_id: int, toast: str = None) -> dict:
 
 
 # ============================================================
+# Diagnostics (Phase D)
+# ============================================================
+
+def render_diagnostics() -> tuple:
+    """Tools panel — manual triggers for the same things the diagnostic
+    agent + log-trim cron do automatically. Useful for incidents."""
+    diag_on = _diagnostic_enabled()
+    text = (
+        "<b>🛠 DIAGNOSTICS</b>\n"
+        "─────────────\n"
+        f"Diagnostic agent: "
+        f"{'✅ ENABLED' if diag_on else '🔕 DISABLED'} "
+        f"(toggle in ⚙️ Toggles)\n"
+        f"Log-tab cap: <code>{MAX_LOG_ROWS}</code> rows\n\n"
+        "Each button below runs the same path as the corresponding "
+        "slash command. Output is sent as a separate message."
+    )
+    keyboard = [
+        [{"text": "🩺 Run /diagnose 60",  "callback_data": "d:diag"}],
+        [{"text": "🗑 Trim Logs now",     "callback_data": "d:trim"}],
+        [{"text": "🐞 Method debug",      "callback_data": "d:mdebug"}],
+        [{"text": "🧪 Method test",       "callback_data": "d:mtest"}],
+        _nav_row(back_to="m:home"),
+    ]
+    return text, keyboard
+
+
+def diagnostics_action(verb: str) -> str:
+    """Run one diagnostic action and return a message string."""
+    from core import commands as cmd_mod
+    if verb == "diag":
+        return cmd_mod._cmd_diagnose(["60"])
+    if verb == "trim":
+        return cmd_mod._cmd_trim_logs()
+    if verb == "mdebug":
+        return cmd_mod._cmd_method_debug()
+    if verb == "mtest":
+        return cmd_mod._cmd_method_test()
+    return f"Unknown diagnostics verb: {verb}"
+
+
+def open_diagnostics(message_id: int) -> dict:
+    text, kb = render_diagnostics()
+    telegram_client.edit_message_text(message_id, text,
+                                      inline_keyboard=kb)
+    return {"screen": "d:home"}
+
+
+# ============================================================
 # Top-level callback dispatch — wired into the webhook handler
 # ============================================================
 
@@ -926,13 +975,14 @@ def _route(data: str, message_id: int) -> None:
         telegram_client.send_message(text)
         open_method(message_id); return
 
-    # ----- Diagnostics placeholder (Phase D) -----
-    if data.startswith("d:"):
-        log_event("INFO", "menu",
-                  f"callback not yet implemented in this phase: {data}")
-        telegram_client.send_message(
-            f"<i>This screen lands in Phase D: <code>{data}</code></i>"
-        )
+    # ----- Diagnostics (Phase D) -----
+    if data == "d:home":
+        open_diagnostics(message_id); return
+    if data in ("d:diag", "d:trim", "d:mdebug", "d:mtest"):
+        verb = data[2:]
+        result = diagnostics_action(verb)
+        telegram_client.send_message(result)
+        open_diagnostics(message_id)
         return
 
     log_event("WARN", "menu", f"Unknown callback path: {data}")
