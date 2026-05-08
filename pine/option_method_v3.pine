@@ -3,7 +3,7 @@
 // Attach to: CAPITALCOM:US500 on 5-minute chart
 
 //@version=6
-indicator("Option Method (Phase G.4.1)", overlay=true, max_lines_count=50, max_labels_count=50)
+indicator("Option Method (Phase G.4.2)", overlay=true, max_lines_count=50, max_labels_count=50)
 
 // ============================================================================
 // INPUTS
@@ -140,7 +140,7 @@ entry_trigger_call = call_state == 1 and not na(fractal_high_1m) and close > fra
 
 if entry_trigger_call
     call_state := 2
-    call_entry := last_close_1m
+    call_entry := close
     call_stop  := last_5m_fractal_low
     swing_range_c = math.abs(last_5m_fractal_high - last_5m_fractal_low)
     call_tp1 := call_entry + swing_range_c
@@ -186,7 +186,7 @@ entry_trigger_put = put_state == 1 and not na(fractal_low_1m) and close < fracta
 
 if entry_trigger_put
     put_state := 2
-    put_entry := last_close_1m
+    put_entry := close
     put_stop  := last_5m_fractal_high
     swing_range_p = math.abs(last_5m_fractal_high - last_5m_fractal_low)
     put_tp1 := put_entry - swing_range_p
