@@ -926,7 +926,7 @@ def _send_pre_signal_alert(ticker, direction, trigger_level, levels):
     text = (
         f"⚡ <b>PRE-SIGNAL — {ticker} {side}</b>\n"
         f"Setup forming: trend ✅ MACD 10m ✅ MACD 1m ✅\n"
-        f"Watching for 1m close {op} <code>{_fmt(trigger_level)}</code>\n"
+        f"Watching for 5m close {op} <code>{_fmt(trigger_level)}</code>\n"
         f"Stand by for entry signal."
     )
     try:
@@ -956,7 +956,7 @@ def _send_entry_alert(ticker, direction, signal_id, entry_price,
     text = (
         f"🟢 <b>ENTRY SIGNAL — {ticker} {side}</b>\n"
         f"Trigger: <code>{_fmt(entry_price)}</code> "
-        f"(1m close {op} <code>{_fmt(trigger_level)}</code>)\n"
+        f"(5m close {op} <code>{_fmt(trigger_level)}</code>)\n"
         f"Stop: <code>{_fmt(levels.get('stop'))}</code>\n"
         f"TP1: <code>{_fmt(levels.get('tp1'))}</code>\n"
         f"{tp2_line}\n"
