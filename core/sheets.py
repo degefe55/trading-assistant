@@ -297,6 +297,28 @@ def trim_logs_if_needed() -> dict:
     return {"trimmed": True, "deleted": deleted, "remaining": remaining}
 
 
+def get_last_log_row(module: str = None) -> dict:
+    """Return the most-recent row in the Logs tab (optionally filtered
+    by Module column), as a {column: value} dict, or {} if none.
+
+    Reads the tail of the Logs tab via read_recent_logs (single ranged
+    fetch — cheap even on a 50k-row sheet) and walks back from the
+    newest row to find the first match. Empty trailing rows (allocated
+    grid space) are skipped via the Timestamp check."""
+    rows = read_recent_logs(limit=200)
+    if not rows:
+        return {}
+    target = (module or "").strip().lower() or None
+    for r in reversed(rows):
+        if not r.get("Timestamp"):
+            continue
+        if target is None:
+            return r
+        if str(r.get("Module", "")).strip().lower() == target:
+            return r
+    return {}
+
+
 def read_recent_logs(limit: int = 200) -> list:
     """Return up to `limit` most recent rows from the Logs tab as
     {column: value} dicts. Cheap alternative to get_all_records() when

@@ -1133,8 +1133,8 @@ def _cmd_method(args: list) -> str:
                 "  • <code>/method history</code> — last 10 signals\n"
                 "  • <code>/method test</code> — fire a synthetic "
                 "TradingView webhook to self-test\n"
-                "  • <code>/method debug</code> — Databento data-source "
-                "health probe (legacy polling path)")
+                "  • <code>/method debug</code> — TradingView webhook "
+                "health probe (last-seen + 24h status)")
 
     sub = args[0].lower().strip()
     if sub == "status":
@@ -1260,40 +1260,86 @@ def _cmd_method_reset() -> str:
 
 
 def _cmd_method_debug() -> str:
-    """`/method debug` — manual data-source health probe for the dormant
-    polling path. Hits Databento with the configured METHOD_TICKER + a
-    1m bar; never called on a schedule. Used after Railway redeploys
-    to confirm the DATABENTO_API_KEY env var actually reached the
-    container. Phase A: renamed from /method_health and folded into
-    the /method subcommand surface."""
-    from config import METHOD_TICKER, DATABENTO_DATASET
-    try:
-        from core import databento_client
-    except Exception as e:
-        return f"❌ Could not import databento_client: {e}"
+    """`/method debug` — TradingView webhook health probe.
 
-    try:
-        result = databento_client.health_check()
-    except Exception as e:
-        return f"❌ Databento health-check crashed: {e}"
+    Replaced the legacy Databento polling-path health check (Phase G.4
+    moved the option method to webhooks; the Databento check was
+    measuring something that no longer mattered). Now reports:
 
-    ok = result.get("ok")
-    err = result.get("error")
-    last = result.get("latest_close")
+      - Last webhook received timestamp (newest Logs row from
+        webhook_tv or method modules)
+      - Last alert delivered (most recent MethodSignals row)
+      - Webhook secret + METHOD_ENABLED state
+      - 24h health verdict
+    """
+    from datetime import timedelta
+    from config import TRADINGVIEW_WEBHOOK_SECRET
+    from core import method_runner
 
-    lines = ["<b>🩺 METHOD DATA-SOURCE HEALTH</b>", "─────────────"]
-    lines.append(f"Provider: <code>Databento ({DATABENTO_DATASET})</code>")
-    lines.append(f"Symbol:   <code>{METHOD_TICKER}</code>")
-    if ok:
-        lines.append(f"Status:   ✅ ok")
-        lines.append(f"Last close: <code>{last}</code>")
+    secret_set = bool(TRADINGVIEW_WEBHOOK_SECRET)
+    method_on = method_runner.is_method_enabled()
+
+    last_webhook_row = sheets.get_last_log_row(module="webhook_tv") or {}
+    last_method_row = sheets.get_last_log_row(module="method") or {}
+
+    def _ts(row):
+        return str(row.get("Timestamp", "") or "").strip()
+
+    ts_w = _ts(last_webhook_row)
+    ts_m = _ts(last_method_row)
+    last_received = max(ts_w, ts_m) if (ts_w or ts_m) else ""
+
+    rows = sheets.read_method_signals(limit=1) or []
+    last_signal = rows[0] if rows else {}
+    last_signal_at = ""
+    if last_signal:
+        d = str(last_signal.get("Date", "") or "").strip()
+        t = str(last_signal.get("Time_KSA", "") or "").strip()
+        last_signal_at = f"{d} {t}".strip()
+    last_signal_id = str(last_signal.get("SignalID", "") or "").strip() or "—"
+
+    healthy_24h = False
+    age_str = "—"
+    if last_received:
+        try:
+            ts = datetime.strptime(last_received[:19],
+                                   "%Y-%m-%d %H:%M:%S").replace(tzinfo=KSA_TZ)
+            delta = datetime.now(KSA_TZ) - ts
+            healthy_24h = delta < timedelta(hours=24)
+            mins = int(delta.total_seconds() // 60)
+            if mins < 60:
+                age_str = f"{mins}m ago"
+            elif mins < 1440:
+                age_str = f"{mins // 60}h ago"
+            else:
+                age_str = f"{mins // 1440}d ago"
+        except (ValueError, TypeError):
+            pass
+
+    lines = ["<b>🩺 METHOD WEBHOOK HEALTH</b>", "─────────────"]
+    lines.append("Mode: <code>webhook-driven (TradingView)</code>")
+    lines.append(f"METHOD_ENABLED: "
+                 f"{'✅ true' if method_on else '🔕 false'}")
+    lines.append(f"Webhook secret:  "
+                 f"{'✅ set' if secret_set else '⚠️ not set'}")
+    lines.append("")
+    lines.append(f"Last webhook seen:    "
+                 f"<code>{last_received or '—'}</code>"
+                 + (f"  ({age_str})" if last_received else ""))
+    lines.append(f"Last alert delivered: "
+                 f"<code>{last_signal_at or '—'}</code>")
+    if last_signal_id != "—":
+        lines.append(f"Last SignalID:        <code>{last_signal_id}</code>")
+    lines.append("")
+    if healthy_24h:
+        lines.append("Status: ✅ <b>healthy</b> "
+                     "— webhook received in the last 24h")
+    elif last_received:
+        lines.append("Status: ⚠️ <b>no webhooks in 24h+</b> "
+                     "— check TradingView alert configuration")
     else:
-        lines.append(f"Status:   ❌ failed")
-        lines.append(f"Error: <code>{err or 'unknown'}</code>")
-        lines.append("")
-        lines.append("<i>Check Logs tab for the underlying HTTP error. "
-                     "Most common causes: missing DATABENTO_API_KEY env "
-                     "var on Railway, or symbol/dataset mismatch.</i>")
+        lines.append("Status: ⚠️ <b>no webhook activity recorded</b> "
+                     "— verify alerts are firing and METHOD_ENABLED is on")
     return "\n".join(lines)
 
 

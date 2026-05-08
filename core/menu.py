@@ -730,7 +730,7 @@ def render_method() -> tuple:
         [{"text": "🔄 Reset",          "callback_data": "x:reset"},
          {"text": "📜 History (10)",   "callback_data": "x:hist"}],
         [{"text": "🧪 Test webhook",   "callback_data": "x:test"},
-         {"text": "🐞 Debug data",     "callback_data": "x:debug"}],
+         {"text": "🩺 Webhook health", "callback_data": "x:debug"}],
         _nav_row(back_to="m:home"),
     ]
     return "\n".join(text_lines), keyboard
@@ -788,10 +788,10 @@ def render_diagnostics() -> tuple:
         "slash command. Output is sent as a separate message."
     )
     keyboard = [
-        [{"text": "🩺 Run /diagnose 60",  "callback_data": "d:diag"}],
-        [{"text": "🗑 Trim Logs now",     "callback_data": "d:trim"}],
-        [{"text": "🐞 Method debug",      "callback_data": "d:mdebug"}],
-        [{"text": "🧪 Method test",       "callback_data": "d:mtest"}],
+        [{"text": "🩺 Run /diagnose 60",   "callback_data": "d:diag"}],
+        [{"text": "🗑 Trim Logs now",      "callback_data": "d:trim"}],
+        [{"text": "🩺 Method webhook health", "callback_data": "d:mdebug"}],
+        [{"text": "🧪 Method test",        "callback_data": "d:mtest"}],
         _nav_row(back_to="m:home"),
     ]
     return text, keyboard
