@@ -437,6 +437,339 @@ def open_schedule_pick_mm(message_id: int, brief: str, hh: str) -> dict:
 
 
 # ============================================================
+# Run a brief (Phase C)
+# ============================================================
+
+def _running_briefs() -> set:
+    """Snapshot of which briefs/method ticks are in flight right now.
+    Reads webhook.app._currently_running under its existing lock."""
+    try:
+        from webhook import app as webhook_app
+        with webhook_app._running_lock:
+            return set(webhook_app._currently_running)
+    except Exception as e:
+        log_event("WARN", "menu", f"_running_briefs failed: {e}")
+        return set()
+
+
+def render_run() -> tuple:
+    """Brief launcher screen. Shows US briefs always, SA briefs when SA
+    is active, plus a Cancel button per currently-running brief."""
+    running = _running_briefs()
+    text = (
+        "<b>🚀 RUN A BRIEF</b>\n"
+        "─────────────\n"
+        "Tap a brief to fire it in the background. The result message "
+        "lands in 30–90 seconds. Re-tapping while a brief is running "
+        "is a no-op."
+    )
+    if running:
+        listed = ", ".join(sorted(running))
+        text += f"\n\n<i>Currently running: {listed}</i>"
+
+    keyboard = []
+    keyboard.append([{"text": "🇺🇸 US Pre-market",
+                       "callback_data": "r:premarket"}])
+    keyboard.append([{"text": "🇺🇸 US Mid-session",
+                       "callback_data": "r:midsession"}])
+    keyboard.append([{"text": "🇺🇸 US Pre-close",
+                       "callback_data": "r:preclose"}])
+    keyboard.append([{"text": "🇺🇸 US End of day",
+                       "callback_data": "r:eod"}])
+    if "SA" in ACTIVE_MARKETS:
+        keyboard.append([{"text": "🇸🇦 SA Pre-market",
+                           "callback_data": "r:premarket_sa"}])
+        keyboard.append([{"text": "🇸🇦 SA Mid-session",
+                           "callback_data": "r:midsession_sa"}])
+        keyboard.append([{"text": "🇸🇦 SA Pre-close",
+                           "callback_data": "r:preclose_sa"}])
+        keyboard.append([{"text": "🇸🇦 SA End of day",
+                           "callback_data": "r:eod_sa"}])
+
+    # One Cancel row per running brief — keys are short enough.
+    for brief in sorted(running):
+        keyboard.append([{"text": f"🛑 Cancel {brief}",
+                           "callback_data": f"r:cancel:{brief}"}])
+
+    keyboard.append(_nav_row(back_to="m:home"))
+    return text, keyboard
+
+
+def fire_brief(brief: str) -> str:
+    """Spawn a brief in the background. Returns a toast string."""
+    try:
+        from webhook import app as webhook_app
+    except Exception as e:
+        return f"❌ Could not reach scheduler: {e}"
+    spawned, reason = webhook_app._spawn_brief(brief, source="menu")
+    if spawned:
+        return f"🚀 {brief} running in background…"
+    return f"⚠️ {brief} not started — {reason}"
+
+
+def cancel_brief(brief: str) -> str:
+    """Request cancellation. Same path /cancel uses."""
+    try:
+        from webhook import app as webhook_app
+        from core import analyst as analyst_mod
+    except Exception as e:
+        return f"❌ Could not reach scheduler: {e}"
+
+    # Watcher / method use distinct cancel keys per the existing
+    # /cancel command logic. For /menu we only expose briefs (not
+    # watcher / method), so a 1:1 mapping is enough.
+    flag_was_new = analyst_mod.request_cancel(brief)
+    if flag_was_new:
+        return f"🛑 Cancellation requested for {brief}"
+    return f"⚠️ {brief} already had a pending cancellation"
+
+
+def open_run(message_id: int, toast: str = None) -> dict:
+    text, kb = render_run()
+    if toast:
+        text = f"<i>{toast}</i>\n\n" + text
+    telegram_client.edit_message_text(message_id, text,
+                                      inline_keyboard=kb)
+    return {"screen": "r:home"}
+
+
+# ============================================================
+# Watchlist (Phase C)
+# ============================================================
+
+# Soft cap for per-screen ticker buttons. Telegram tolerates up to 100
+# total but rendering anything close to that is unusable on phone. Past
+# this cap we render the ticker list as text and skip the per-ticker
+# buttons (with a hint to use slash commands).
+_WATCHLIST_BUTTON_CAP = 24
+
+
+def _safe_ticker(t) -> str:
+    """Coerce + uppercase. Saudi codes come back from gspread as int."""
+    s = str(t or "").strip().upper()
+    return s
+
+
+def _watchlist_for(market: str) -> tuple:
+    """Return (watch_list, focus_list) for a market. Both are clean
+    str lists, deduped, in original order."""
+    from core.commands import _default_watchlist
+    watch = sheets.read_watchlist(
+        default=_default_watchlist(market), market=market) or []
+    focus_rows = sheets.read_focus(market=market) or []
+    focus = [_safe_ticker(r.get("Ticker", ""))
+             for r in focus_rows if r.get("Ticker") not in (None, "")]
+    return [_safe_ticker(t) for t in watch], focus
+
+
+def render_watchlist() -> tuple:
+    """Watchlist + focus dashboard. Per-ticker buttons for remove +
+    focus toggle. Adding a new ticker stays typed (free-form name)."""
+    text_lines = ["<b>👁 WATCHLIST</b>", "─────────────"]
+    keyboard = []
+
+    markets_to_show = ["US"]
+    for m in ACTIVE_MARKETS:
+        if m not in markets_to_show:
+            markets_to_show.append(m)
+
+    total_buttons = 0
+
+    for market in markets_to_show:
+        watch, focus = _watchlist_for(market)
+        flag = ("🇺🇸" if market == "US"
+                else ("🇸🇦" if market == "SA" else "🌐"))
+        text_lines.append("")
+        text_lines.append(f"<b>{flag} {market}</b>")
+        if focus:
+            text_lines.append("  🎯 Focus: " +
+                              " ".join(f"<code>{t}</code>" for t in focus))
+        else:
+            text_lines.append("  🎯 Focus: <i>(none)</i>")
+        if watch:
+            text_lines.append("  👁 Watch: " +
+                              " ".join(f"<code>{t}</code>" for t in watch))
+        else:
+            text_lines.append("  👁 Watch: <i>(empty)</i>")
+
+        # Per-ticker buttons for the watchlist (remove + promote)
+        for t in watch:
+            if total_buttons >= _WATCHLIST_BUTTON_CAP:
+                break
+            keyboard.append([
+                {"text": f"🔭 Focus {t}",
+                 "callback_data": f"w:foc:{t}"},
+                {"text": f"🗑 Unwatch {t}",
+                 "callback_data": f"w:rm:{t}"},
+            ])
+            total_buttons += 2
+
+        # Per-focus buttons (unfocus only)
+        for t in focus:
+            if total_buttons >= _WATCHLIST_BUTTON_CAP:
+                break
+            keyboard.append([
+                {"text": f"🚫 Unfocus {t}",
+                 "callback_data": f"w:unfoc:{t}"},
+            ])
+            total_buttons += 1
+
+    if total_buttons >= _WATCHLIST_BUTTON_CAP:
+        text_lines.append("")
+        text_lines.append("<i>List is long — only first ~24 buttons "
+                          "shown. Use /unwatch /unfocus for the rest.</i>")
+
+    text_lines.append("")
+    text_lines.append("<i>To add a new ticker, send "
+                      "<code>/watch SYMBOL</code> (free-form input "
+                      "needed for new symbols).</i>")
+
+    keyboard.append([{"text": "➕ Add ticker (typed)",
+                       "callback_data": "w:add"}])
+    keyboard.append(_nav_row(back_to="m:home"))
+    return "\n".join(text_lines), keyboard
+
+
+def watchlist_action(verb: str, ticker: str) -> str:
+    """Apply rm / foc / unfoc to a ticker. Auto-detects market by shape
+    using the same _detect_market in commands.py."""
+    from core.commands import _detect_market
+    ticker = _safe_ticker(ticker)
+    if not ticker:
+        return "⚠️ Empty ticker"
+    market = _detect_market(ticker)
+    if market is None:
+        return f"❌ Cannot infer market for {ticker}"
+
+    if verb == "rm":
+        from core.commands import _default_watchlist
+        current = sheets.read_watchlist(
+            default=_default_watchlist(market), market=market) or []
+        new_list = [t for t in current if _safe_ticker(t) != ticker]
+        if sheets.write_watchlist(new_list, market=market):
+            return f"🗑 Removed {ticker} from {market} watchlist"
+        return f"❌ Sheet write failed for unwatch {ticker}"
+
+    if verb == "foc":
+        result = sheets.add_focus(ticker, market=market)
+        if result.get("ok"):
+            extra = (f" (dropped {result['dropped']})"
+                     if result.get("dropped") else "")
+            return f"🔭 Focus added: {ticker}{extra}"
+        return f"❌ {result.get('error', 'focus failed')}"
+
+    if verb == "unfoc":
+        result = sheets.remove_focus(ticker)
+        if result.get("ok"):
+            return f"🚫 Focus removed: {ticker}"
+        return f"❌ {result.get('error', 'unfocus failed')}"
+
+    return f"Unknown watchlist verb: {verb}"
+
+
+def open_watchlist(message_id: int, toast: str = None) -> dict:
+    text, kb = render_watchlist()
+    if toast:
+        text = f"<i>{toast}</i>\n\n" + text
+    telegram_client.edit_message_text(message_id, text,
+                                      inline_keyboard=kb)
+    return {"screen": "w:home"}
+
+
+# ============================================================
+# Method dashboard (Phase C)
+# ============================================================
+
+def render_method() -> tuple:
+    """Live method dashboard. Mirrors /method status as a panel +
+    buttons mapping to the existing /method subcommands."""
+    enabled = _method_enabled()
+    secret_set = bool(TRADINGVIEW_WEBHOOK_SECRET)
+
+    today_str = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
+    cd_call = sheets.read_method_cooldown(today_str, "call") or {}
+    cd_put = sheets.read_method_cooldown(today_str, "put") or {}
+
+    try:
+        from core import method_state
+        snap = method_state.get_tracker().state_snapshot()
+    except Exception as e:
+        snap = {}
+        log_event("WARN", "menu",
+                  f"method dashboard tracker snapshot failed: {e}")
+
+    def _fmt_dir(d):
+        s = snap.get(d, {})
+        return f"{s.get('state', '—')} ({s.get('signal_id') or '—'})"
+
+    text_lines = [
+        "<b>🎯 METHOD</b>",
+        "─────────────",
+        f"State: {'✅ ENABLED' if enabled else '🔕 DISABLED'}",
+        "Mode: <code>webhook-driven (TradingView)</code>",
+        f"Webhook secret: {'✅ set' if secret_set else '⚠️ not set'}",
+        f"Ticker: <code>{METHOD_TICKER}</code>",
+        f"Daily cap: <code>{METHOD_MAX_DAILY_SIGNALS}</code> per direction",
+        "",
+        "<b>📊 Direction state</b>",
+        f"  CALL: <code>{_fmt_dir('call')}</code>",
+        f"  PUT:  <code>{_fmt_dir('put')}</code>",
+        "",
+        "<b>📅 Today's setup count</b>",
+        f"  CALL: {cd_call.get('SetupCount', 0) or 0}/"
+        f"{METHOD_MAX_DAILY_SIGNALS}",
+        f"  PUT:  {cd_put.get('SetupCount', 0) or 0}/"
+        f"{METHOD_MAX_DAILY_SIGNALS}",
+    ]
+
+    toggle_cb = "x:off" if enabled else "x:on"
+    toggle_text = ("🔕 Disable method" if enabled
+                   else "✅ Enable method")
+    keyboard = [
+        [{"text": toggle_text,         "callback_data": toggle_cb}],
+        [{"text": "🔄 Reset",          "callback_data": "x:reset"},
+         {"text": "📜 History (10)",   "callback_data": "x:hist"}],
+        [{"text": "🧪 Test webhook",   "callback_data": "x:test"},
+         {"text": "🐞 Debug data",     "callback_data": "x:debug"}],
+        _nav_row(back_to="m:home"),
+    ]
+    return "\n".join(text_lines), keyboard
+
+
+def method_action(verb: str) -> str:
+    """Apply a method action and return a toast string. The full panels
+    (history, debug, test) get sent as separate Telegram messages so
+    the menu screen itself stays compact."""
+    from core import commands as cmd_mod
+    if verb == "on":
+        if sheets.write_config("METHOD_ENABLED", "true"):
+            return "✅ METHOD_ENABLED → true"
+        return "❌ Could not write METHOD_ENABLED"
+    if verb == "off":
+        if sheets.write_config("METHOD_ENABLED", "false"):
+            return "🔕 METHOD_ENABLED → false"
+        return "❌ Could not write METHOD_ENABLED"
+    if verb == "reset":
+        return cmd_mod._cmd_method_reset()
+    if verb == "hist":
+        return cmd_mod._cmd_method_history()
+    if verb == "test":
+        return cmd_mod._cmd_method_test()
+    if verb == "debug":
+        return cmd_mod._cmd_method_debug()
+    return f"Unknown method verb: {verb}"
+
+
+def open_method(message_id: int, toast: str = None) -> dict:
+    text, kb = render_method()
+    if toast:
+        text = f"<i>{toast}</i>\n\n" + text
+    telegram_client.edit_message_text(message_id, text,
+                                      inline_keyboard=kb)
+    return {"screen": "x:home"}
+
+
+# ============================================================
 # Top-level callback dispatch — wired into the webhook handler
 # ============================================================
 
@@ -525,12 +858,80 @@ def _route(data: str, message_id: int) -> None:
         open_schedule(message_id)
         return
 
-    # ----- Phase C + D placeholders (filled in next two phases) -----
-    if data.startswith(("r:", "w:", "x:", "d:")):
+    # ----- Run a brief (Phase C) -----
+    if data == "r:home":
+        open_run(message_id); return
+    if data.startswith("r:cancel:"):
+        brief = data[len("r:cancel:"):]
+        toast = cancel_brief(brief)
+        open_run(message_id, toast=toast)
+        return
+    if data.startswith("r:"):
+        brief = data[len("r:"):]
+        # Validate against the brief surface; reject anything we don't
+        # recognize so callback typos don't fire random briefs.
+        from core.commands import VALID_BRIEFS
+        if brief in VALID_BRIEFS and not brief.startswith("watcher") \
+                and brief != "method":
+            toast = fire_brief(brief)
+            open_run(message_id, toast=toast)
+        else:
+            open_run(message_id, toast=f"Unknown brief: {brief}")
+        return
+
+    # ----- Watchlist (Phase C) -----
+    if data == "w:home":
+        open_watchlist(message_id); return
+    if data == "w:add":
+        telegram_client.send_message(
+            "<b>➕ Add ticker</b>\n"
+            "Send: <code>/watch SYMBOL</code>\n"
+            "e.g. <code>/watch NVDA</code> or "
+            "<code>/watch 2222</code> (Aramco)"
+        )
+        open_watchlist(message_id)
+        return
+    if data.startswith("w:rm:"):
+        toast = watchlist_action("rm", data[len("w:rm:"):])
+        open_watchlist(message_id, toast=toast); return
+    if data.startswith("w:foc:"):
+        toast = watchlist_action("foc", data[len("w:foc:"):])
+        open_watchlist(message_id, toast=toast); return
+    if data.startswith("w:unfoc:"):
+        toast = watchlist_action("unfoc", data[len("w:unfoc:"):])
+        open_watchlist(message_id, toast=toast); return
+
+    # ----- Method (Phase C) -----
+    if data == "x:home":
+        open_method(message_id); return
+    if data in ("x:on", "x:off"):
+        toast = method_action(data[2:])
+        open_method(message_id, toast=toast); return
+    if data == "x:reset":
+        toast = method_action("reset")
+        # Reset returns a multi-line payload — render as a separate
+        # message rather than cramming into the menu header.
+        telegram_client.send_message(toast)
+        open_method(message_id); return
+    if data == "x:hist":
+        text = method_action("hist")
+        telegram_client.send_message(text)
+        open_method(message_id); return
+    if data == "x:test":
+        text = method_action("test")
+        telegram_client.send_message(text)
+        open_method(message_id); return
+    if data == "x:debug":
+        text = method_action("debug")
+        telegram_client.send_message(text)
+        open_method(message_id); return
+
+    # ----- Diagnostics placeholder (Phase D) -----
+    if data.startswith("d:"):
         log_event("INFO", "menu",
                   f"callback not yet implemented in this phase: {data}")
         telegram_client.send_message(
-            f"<i>This screen lands in a later phase: <code>{data}</code></i>"
+            f"<i>This screen lands in Phase D: <code>{data}</code></i>"
         )
         return
 
