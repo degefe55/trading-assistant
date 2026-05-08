@@ -1,0 +1,244 @@
+// Phase G.4 - Option Method
+// Pine Script v6
+// Attach to: CAPITALCOM:US500 on 5-minute chart
+
+//@version=6
+indicator("Option Method (Phase G.4.1)", overlay=true, max_lines_count=50, max_labels_count=50)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+i_secret      = input.string("CHANGE_ME_BEFORE_DEPLOY", "Webhook Secret Token", group="Webhook")
+i_macd_fast   = input.int(12, "MACD Fast", minval=1, group="MACD")
+i_macd_slow   = input.int(26, "MACD Slow", minval=1, group="MACD")
+i_macd_signal = input.int(9, "MACD Signal", minval=1, group="MACD")
+i_vwap_dev2   = input.float(2.0, "VWAP sigma for TP2", minval=0.5, step=0.5, group="VWAP")
+i_vwap_dev3   = input.float(3.0, "VWAP sigma for TP3", minval=0.5, step=0.5, group="VWAP")
+i_lookback    = input.int(30, "Swing lookback bars", minval=5, group="Trend")
+i_show_levels = input.bool(true, "Show TP/Stop lines", group="Display")
+i_show_state  = input.bool(true, "Show state labels", group="Display")
+
+// ============================================================================
+// MACD ALIGNMENT
+// ============================================================================
+f_macd_aligned(string _dir) =>
+    [_macd, _signal_line, _hist] = ta.macd(close, i_macd_fast, i_macd_slow, i_macd_signal)
+    _bull = _hist > 0 and _macd < _hist
+    _bear = _hist < 0 and _macd > _hist
+    _dir == "bull" ? _bull : _bear
+
+aligned_10m_bull = request.security(syminfo.tickerid, "10", f_macd_aligned("bull"), barmerge.gaps_off, barmerge.lookahead_off)
+aligned_10m_bear = request.security(syminfo.tickerid, "10", f_macd_aligned("bear"), barmerge.gaps_off, barmerge.lookahead_off)
+aligned_1m_bull  = request.security(syminfo.tickerid, "1",  f_macd_aligned("bull"), barmerge.gaps_off, barmerge.lookahead_off)
+aligned_1m_bear  = request.security(syminfo.tickerid, "1",  f_macd_aligned("bear"), barmerge.gaps_off, barmerge.lookahead_off)
+
+macd_call_aligned = aligned_10m_bull and aligned_1m_bull
+macd_put_aligned  = aligned_10m_bear and aligned_1m_bear
+
+// ============================================================================
+// FRACTAL DETECTION (5-bar Bill Williams)
+// ============================================================================
+is_fractal_high_5m = high[2] > high[3] and high[2] > high[4] and high[2] > high[1] and high[2] > high[0]
+is_fractal_low_5m  = low[2]  < low[3]  and low[2]  < low[4]  and low[2]  < low[1]  and low[2]  < low[0]
+
+var float last_5m_fractal_high = na
+var float last_5m_fractal_low  = na
+
+if is_fractal_high_5m
+    last_5m_fractal_high := high[2]
+if is_fractal_low_5m
+    last_5m_fractal_low := low[2]
+
+[fh_1m, fl_1m, last_close_1m] = request.security(syminfo.tickerid, "1",
+     [
+       (high[2] > high[3] and high[2] > high[4] and high[2] > high[1] and high[2] > high[0]) ? high[2] : na,
+       (low[2]  < low[3]  and low[2]  < low[4]  and low[2]  < low[1]  and low[2]  < low[0])  ? low[2]  : na,
+       close
+     ],
+     barmerge.gaps_off, barmerge.lookahead_off)
+
+var float fractal_high_1m = na
+var float fractal_low_1m  = na
+
+if not na(fh_1m)
+    fractal_high_1m := fh_1m
+if not na(fl_1m)
+    fractal_low_1m := fl_1m
+
+// ============================================================================
+// TREND
+// ============================================================================
+trend_bullish = not na(last_5m_fractal_high) and close > last_5m_fractal_high
+trend_bearish = not na(last_5m_fractal_low)  and close < last_5m_fractal_low
+
+// ============================================================================
+// VWAP + bands
+// ============================================================================
+vwap_value = ta.vwap(hlc3)
+vwap_dev   = ta.stdev(close - vwap_value, i_lookback)
+vwap_up_2  = vwap_value + i_vwap_dev2 * vwap_dev
+vwap_dn_2  = vwap_value - i_vwap_dev2 * vwap_dev
+vwap_up_3  = vwap_value + i_vwap_dev3 * vwap_dev
+vwap_dn_3  = vwap_value - i_vwap_dev3 * vwap_dev
+
+// ============================================================================
+// STATE MACHINE STORAGE
+// ============================================================================
+var int   call_state = 0
+var float call_entry = na
+var float call_stop  = na
+var float call_tp1   = na
+var float call_tp2   = na
+var float call_tp3   = na
+var bool  call_tp1_hit = false
+var bool  call_tp2_hit = false
+var bool  call_tp3_hit = false
+
+var int   put_state = 0
+var float put_entry = na
+var float put_stop  = na
+var float put_tp1   = na
+var float put_tp2   = na
+var float put_tp3   = na
+var bool  put_tp1_hit = false
+var bool  put_tp2_hit = false
+var bool  put_tp3_hit = false
+
+// ============================================================================
+// PAYLOAD HELPER (all params explicitly typed)
+// ============================================================================
+f_payload(string _event, string _dir, float _trigger, float _stop, float _tp1, float _tp2, float _tp3) =>
+    s = "{"
+    s := s + "\"secret\":\"" + i_secret + "\","
+    s := s + "\"event\":\"" + _event + "\","
+    s := s + "\"direction\":\"" + _dir + "\","
+    s := s + "\"symbol\":\"" + syminfo.tickerid + "\","
+    s := s + "\"trigger_price\":" + str.tostring(_trigger) + ","
+    s := s + "\"stop_price\":" + str.tostring(_stop) + ","
+    s := s + "\"tp1\":" + str.tostring(_tp1) + ","
+    s := s + "\"tp2\":" + str.tostring(_tp2) + ","
+    s := s + "\"tp3\":" + str.tostring(_tp3) + ","
+    s := s + "\"fractal_high\":" + str.tostring(last_5m_fractal_high) + ","
+    s := s + "\"fractal_low\":" + str.tostring(last_5m_fractal_low) + ","
+    s := s + "\"timestamp\":\"" + str.tostring(time, "yyyy-MM-dd HH:mm:ss") + "Z\""
+    s := s + "}"
+    s
+
+// Typed na constant we can pass to f_payload without errors
+float NA_F = na
+
+// ============================================================================
+// CALL SIDE
+// ============================================================================
+call_setup_active = trend_bullish and macd_call_aligned
+
+if call_state == 0 and call_setup_active
+    call_state := 1
+    alert(f_payload("pre_signal", "call", close, last_5m_fractal_low, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
+
+entry_trigger_call = call_state == 1 and not na(fractal_high_1m) and close > fractal_high_1m
+
+if entry_trigger_call
+    call_state := 2
+    call_entry := last_close_1m
+    call_stop  := last_5m_fractal_low
+    swing_range_c = math.abs(last_5m_fractal_high - last_5m_fractal_low)
+    call_tp1 := call_entry + swing_range_c
+    call_tp2 := vwap_up_2
+    call_tp3 := vwap_up_3
+    call_tp1_hit := false
+    call_tp2_hit := false
+    call_tp3_hit := false
+    alert(f_payload("entry", "call", call_entry, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
+
+if call_state == 2
+    if not call_tp1_hit and high >= call_tp1
+        call_tp1_hit := true
+        alert(f_payload("tp1_hit", "call", call_tp1, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
+    if not call_tp2_hit and high >= call_tp2
+        call_tp2_hit := true
+        alert(f_payload("tp2_hit", "call", call_tp2, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
+    if not call_tp3_hit and high >= call_tp3
+        call_tp3_hit := true
+        call_state := 3
+        alert(f_payload("tp3_hit", "call", call_tp3, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
+    if barstate.isconfirmed and close < call_stop and call_state == 2
+        call_state := 3
+        alert(f_payload("invalidated", "call", close, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
+
+if (call_state == 1 or call_state == 2) and (not trend_bullish or not aligned_10m_bull)
+    call_state := 3
+    alert(f_payload("setup_ended", "call", close, NA_F, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
+
+if call_state == 3 and not call_setup_active
+    call_state := 0
+
+// ============================================================================
+// PUT SIDE (mirror)
+// ============================================================================
+put_setup_active = trend_bearish and macd_put_aligned
+
+if put_state == 0 and put_setup_active
+    put_state := 1
+    alert(f_payload("pre_signal", "put", close, last_5m_fractal_high, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
+
+entry_trigger_put = put_state == 1 and not na(fractal_low_1m) and close < fractal_low_1m
+
+if entry_trigger_put
+    put_state := 2
+    put_entry := last_close_1m
+    put_stop  := last_5m_fractal_high
+    swing_range_p = math.abs(last_5m_fractal_high - last_5m_fractal_low)
+    put_tp1 := put_entry - swing_range_p
+    put_tp2 := vwap_dn_2
+    put_tp3 := vwap_dn_3
+    put_tp1_hit := false
+    put_tp2_hit := false
+    put_tp3_hit := false
+    alert(f_payload("entry", "put", put_entry, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
+
+if put_state == 2
+    if not put_tp1_hit and low <= put_tp1
+        put_tp1_hit := true
+        alert(f_payload("tp1_hit", "put", put_tp1, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
+    if not put_tp2_hit and low <= put_tp2
+        put_tp2_hit := true
+        alert(f_payload("tp2_hit", "put", put_tp2, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
+    if not put_tp3_hit and low <= put_tp3
+        put_tp3_hit := true
+        put_state := 3
+        alert(f_payload("tp3_hit", "put", put_tp3, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
+    if barstate.isconfirmed and close > put_stop and put_state == 2
+        put_state := 3
+        alert(f_payload("invalidated", "put", close, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
+
+if (put_state == 1 or put_state == 2) and (not trend_bearish or not aligned_10m_bear)
+    put_state := 3
+    alert(f_payload("setup_ended", "put", close, NA_F, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
+
+if put_state == 3 and not put_setup_active
+    put_state := 0
+
+// ============================================================================
+// CHART VISUALS
+// ============================================================================
+plot(i_show_levels and call_state == 2 ? call_entry : na, "Call Entry", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+plot(i_show_levels and call_state == 2 ? call_stop  : na, "Call Stop",  color=color.new(color.red, 0),   style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and call_state == 2 ? call_tp1   : na, "Call TP1",   color=color.new(color.aqua, 0),  style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and call_state == 2 ? call_tp2   : na, "Call TP2",   color=color.new(color.yellow, 0),style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and call_state == 2 ? call_tp3   : na, "Call TP3",   color=color.new(color.orange, 0),style=plot.style_linebr, linewidth=1)
+
+plot(i_show_levels and put_state == 2 ? put_entry : na, "Put Entry", color=color.new(color.maroon, 0), style=plot.style_linebr, linewidth=2)
+plot(i_show_levels and put_state == 2 ? put_stop  : na, "Put Stop",  color=color.new(color.red, 0),    style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and put_state == 2 ? put_tp1   : na, "Put TP1",   color=color.new(color.aqua, 0),   style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and put_state == 2 ? put_tp2   : na, "Put TP2",   color=color.new(color.yellow, 0), style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and put_state == 2 ? put_tp3   : na, "Put TP3",   color=color.new(color.orange, 0), style=plot.style_linebr, linewidth=1)
+
+plot(vwap_value, "VWAP", color=color.new(color.blue, 0))
+plot(vwap_up_2, "VWAP +2sigma", color=color.new(color.yellow, 50))
+plot(vwap_dn_2, "VWAP -2sigma", color=color.new(color.yellow, 50))
+plot(vwap_up_3, "VWAP +3sigma", color=color.new(color.orange, 50))
+plot(vwap_dn_3, "VWAP -3sigma", color=color.new(color.orange, 50))
+
+if i_show_state and barstate.islast
+    label.new(bar_index, high, "C:" + str.tostring(call_state) + " P:" + str.tostring(put_state), color=color.new(color.gray, 80), style=label.style_label_down, textcolor=color.white, size=size.tiny)
