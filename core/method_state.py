@@ -1083,7 +1083,7 @@ def _send_pre_signal_alert(ticker, direction, trigger_level, levels):
     op = "above" if direction == "call" else "below"
     text = (
         f"⚡ <b>PRE-SIGNAL — {ticker} {side}</b>\n"
-        f"Setup forming: trend ✅ MACD 10m ✅ MACD 1m ✅\n"
+        f"Setup forming: index fractal break (G.5.0)\n"
         f"Watching for 5m close {op} <code>{_fmt(trigger_level)}</code>\n"
         f"Stand by for entry signal."
     )
