@@ -1,0 +1,3 @@
+# Local backups produced by scripts/backup_state.py — never commit
+# (they may contain trade history, recommendation reasoning, etc).
+backups/
