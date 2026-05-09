@@ -74,8 +74,16 @@ RULES FOR THIS WATCHER ALERT
    support (filter hallucination), set action = "WAIT" and explain
    plainly in reasoning. Do not invent supporting facts.
 5. Halal is informational only — analyze identically regardless.
-6. If uncertain, action = "WAIT". Do not force a verdict to justify
-   the alert.
+6. WAIT is appropriate when signals genuinely conflict, when data
+   is missing, or when the optimal entry is clearly not yet here.
+   But WAIT is also a cost — perpetual waiting means missed
+   opportunities. If at least two signals align bullishly
+   (technical setup + sector momentum, or technical + supportive
+   macro, or technical + positive news catalyst), recommend BUY
+   with appropriate confidence (low/medium/high reflecting your
+   certainty). Aim for clear conviction in either direction. Do
+   not force a verdict, but also do not retreat to WAIT as a
+   default safety net.
 7. Keep total JSON under 400 words.
 
 Remember: JSON ONLY. No "Here is the analysis:" preamble. Start with
