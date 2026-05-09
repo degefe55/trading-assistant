@@ -1370,12 +1370,16 @@ def _cmd_diagnose(args: list) -> str:
     if args:
         try:
             n = int(args[0])
-            if 1 <= n <= 1440:
-                window = n
         except (ValueError, TypeError):
             return ("Usage: <code>/diagnose [WINDOW_MINUTES]</code>\n"
-                    "Default 60 min. Range 1–1440. "
+                    "Default 60 min. Range 1–10080 (7 days). "
                     "Example: <code>/diagnose 240</code>")
+        # Out-of-range used to fall through silently to the 60m default;
+        # surface it instead so /diagnose 10080 actually scans 7 days.
+        if not (1 <= n <= 10080):
+            return ("Window out of range: must be 1–10080 (7 days). "
+                    f"Got <code>{n}</code>.")
+        window = n
 
     try:
         from core import log_analyst
