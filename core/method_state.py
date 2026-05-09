@@ -306,6 +306,11 @@ class MethodSignalTracker:
                           bars_5m: list, last_close, ticker: str) -> dict:
         """PRE_SIGNAL → TRACKING. Recompute levels using the actual
         entry price and write the entry alert."""
+        # TODO (2026-05-09): _promote_to_entry is dead code in webhook mode (Phase G.4+).
+        # The polling path was retired when Pine Script took over detection.
+        # Consider deleting this function, _handle_direction, and handle_tick polling
+        # logic in a focused refactor session. Until then, keep strings consistent
+        # with G.5.0 reality so the dead path doesn't lie.
         cur = self._dirs[direction]
         signal_id = cur["signal_id"] or _make_signal_id(direction)
 
@@ -377,8 +382,8 @@ class MethodSignalTracker:
                         "stop_loss": levels.get("stop"),
                         "target": levels.get("tp1"),
                         "reasoning": (
-                            f"Trend 5m {direction}, MACD 10m+1m aligned, "
-                            f"1m close through {trigger_level}. "
+                            f"Trend 5m {direction}, 5m close through "
+                            f"{trigger_level} (index-side fractal break). "
                             f"Range = fractal_high - swing_low; TP1 is 1:1 "
                             f"projected. VWAP-derived TP2/TP3 not wired in "
                             f"Phase G.2."
