@@ -3,7 +3,7 @@
 // Attach to: CAPITALCOM:US500 on 5-minute chart
 
 //@version=6
-indicator("Option Method (Phase G.4.4)", overlay=true, max_lines_count=50, max_labels_count=50)
+indicator("Option Method (Phase G.5.0)", overlay=true, max_lines_count=50, max_labels_count=50)
 
 // Workaround for Pine's str.tostring(na) → "NaN" (not valid JSON). See G.4.4.
 f_num(v) => na(v) ? "null" : str.tostring(v)
@@ -135,7 +135,11 @@ float NA_F = na
 // ============================================================================
 // CALL SIDE
 // ============================================================================
-call_setup_active = trend_bullish and macd_call_aligned
+// G.5.0: simplified to index-side conditions only.
+// 10m + 1m MACD filters apply to OPTION CONTRACT, not index.
+// Will be re-added on contract data when Webull OpenAPI access arrives.
+// Until then, every fractal break fires pre_signal.
+call_setup_active = trend_bullish
 
 if call_state == 0 and call_setup_active
     call_state := 1
@@ -171,7 +175,7 @@ if call_state == 2
         call_state := 3
         alert(f_payload("invalidated", "call", close, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
 
-if (call_state == 1 or call_state == 2) and (not trend_bullish or not aligned_10m_bull)
+if (call_state == 1 or call_state == 2) and not trend_bullish
     call_state := 3
     alert(f_payload("setup_ended", "call", close, NA_F, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
 
@@ -181,7 +185,7 @@ if call_state == 3 and not call_setup_active
 // ============================================================================
 // PUT SIDE (mirror)
 // ============================================================================
-put_setup_active = trend_bearish and macd_put_aligned
+put_setup_active = trend_bearish
 
 if put_state == 0 and put_setup_active
     put_state := 1
@@ -217,7 +221,7 @@ if put_state == 2
         put_state := 3
         alert(f_payload("invalidated", "put", close, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
 
-if (put_state == 1 or put_state == 2) and (not trend_bearish or not aligned_10m_bear)
+if (put_state == 1 or put_state == 2) and not trend_bearish
     put_state := 3
     alert(f_payload("setup_ended", "put", close, NA_F, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
 
