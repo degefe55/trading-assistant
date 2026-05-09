@@ -10,6 +10,7 @@ Flow:
 import json
 import re
 import requests
+import time
 from config import MOCK_MODE, TWELVE_DATA_KEY, MARKETAUX_KEY
 from core import claude_client, analyst
 from core.logger import log_event
@@ -79,9 +80,27 @@ def scout_opportunities(held_tickers: set, focus_tickers: set,
 
 def _get_candidate_universe() -> list:
     """Pull candidates from movers + news mentions."""
+    t0 = time.monotonic()
     if MOCK_MODE:
-        return _mock_candidates()
-    return _live_candidates()
+        log_event("INFO", "scout",
+                  "Universe scan: mode=mock (sources=mock_candidates)")
+        out = _mock_candidates()
+    else:
+        log_event("INFO", "scout",
+                  "Universe scan: mode=live "
+                  "(sources=marketaux_news,twelve_data_movers)")
+        out = _live_candidates()
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    by_source = {}
+    for c in out:
+        s = c.get("_source", "unknown")
+        by_source[s] = by_source.get(s, 0) + 1
+    breakdown = (", ".join(f"{k}={v}" for k, v in sorted(by_source.items()))
+                 or "none")
+    log_event("INFO", "scout",
+              f"Universe scan complete: total={len(out)}, "
+              f"breakdown=[{breakdown}], took={elapsed_ms}ms")
+    return out
 
 
 def _mock_candidates() -> list:
@@ -145,6 +164,7 @@ def _live_candidates() -> list:
                 "change_pct": price_data.get("change_pct", 0),
                 "catalyst": f"Mentioned in {count} news articles",
                 "news_mentions": count,
+                "_source": "news",
             })
     except Exception as e:
         log_event("ERROR", "scout", f"News mention fetch failed: {e}")
@@ -157,6 +177,18 @@ def _live_candidates() -> list:
                   "country": "United States", "outputsize": 10}
         r = requests.get(url, params=params, timeout=15)
         if r.ok:
+            log_event("INFO", "scout",
+                      f"Movers HTTP: status={r.status_code}, "
+                      f"len={len(r.text)} chars")
+        else:
+            log_event("INFO", "scout",
+                      f"Movers HTTP: status={r.status_code}, "
+                      f"len={len(r.text)} chars, "
+                      f"body[:200]={r.text[:200]!r}")
+            log_event("WARN", "scout",
+                      f"Movers endpoint non-200: "
+                      f"{r.status_code} {r.reason} | url={url}")
+        if r.ok:
             movers = r.json().get("values", [])
             for m in movers:
                 sym = m.get("symbol")
@@ -168,6 +200,7 @@ def _live_candidates() -> list:
                     "market_cap": 0,  # not always provided
                     "change_pct": float(m.get("percent_change", 0)),
                     "catalyst": f"Top gainer +{m.get('percent_change')}%",
+                    "_source": "movers",
                 })
                 seen_tickers.add(sym)
     except Exception as e:
@@ -178,11 +211,14 @@ def _live_candidates() -> list:
 
 def _fetch_light_quote(ticker: str) -> dict | None:
     """Lightweight price+cap fetch for scouting (not full analysis)."""
+    log_event("DEBUG", "scout", f"Quote lookup: ticker={ticker}")
     try:
         url = "https://api.twelvedata.com/quote"
         params = {"symbol": ticker, "apikey": TWELVE_DATA_KEY}
         r = requests.get(url, params=params, timeout=10)
         if not r.ok:
+            log_event("DEBUG", "scout",
+                      f"Quote {ticker}: status={r.status_code}")
             return None
         d = r.json()
         if "code" in d and d["code"] != 200:
@@ -192,7 +228,8 @@ def _fetch_light_quote(ticker: str) -> dict | None:
             "change_pct": float(d.get("percent_change", 0)),
             "market_cap": 0,  # not in quote endpoint, would need statistics endpoint
         }
-    except Exception:
+    except Exception as e:
+        log_event("WARN", "scout", f"Quote {ticker} failed: {e}")
         return None
 
 
