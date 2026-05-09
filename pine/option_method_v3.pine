@@ -3,7 +3,10 @@
 // Attach to: CAPITALCOM:US500 on 5-minute chart
 
 //@version=6
-indicator("Option Method (Phase G.4.3)", overlay=true, max_lines_count=50, max_labels_count=50)
+indicator("Option Method (Phase G.4.4)", overlay=true, max_lines_count=50, max_labels_count=50)
+
+// Workaround for Pine's str.tostring(na) → "NaN" (not valid JSON). See G.4.4.
+f_num(v) => na(v) ? "null" : str.tostring(v)
 
 // ============================================================================
 // INPUTS
@@ -115,13 +118,13 @@ f_payload(string _event, string _dir, float _trigger, float _stop, float _tp1, f
     s := s + "\"event\":\"" + _event + "\","
     s := s + "\"direction\":\"" + _dir + "\","
     s := s + "\"symbol\":\"" + syminfo.tickerid + "\","
-    s := s + "\"trigger_price\":" + str.tostring(_trigger) + ","
-    s := s + "\"stop_price\":" + str.tostring(_stop) + ","
-    s := s + "\"tp1\":" + str.tostring(_tp1) + ","
-    s := s + "\"tp2\":" + str.tostring(_tp2) + ","
-    s := s + "\"tp3\":" + str.tostring(_tp3) + ","
-    s := s + "\"fractal_high\":" + str.tostring(last_5m_fractal_high) + ","
-    s := s + "\"fractal_low\":" + str.tostring(last_5m_fractal_low) + ","
+    s := s + "\"trigger_price\":" + f_num(_trigger) + ","
+    s := s + "\"stop_price\":" + f_num(_stop) + ","
+    s := s + "\"tp1\":" + f_num(_tp1) + ","
+    s := s + "\"tp2\":" + f_num(_tp2) + ","
+    s := s + "\"tp3\":" + f_num(_tp3) + ","
+    s := s + "\"fractal_high\":" + f_num(last_5m_fractal_high) + ","
+    s := s + "\"fractal_low\":" + f_num(last_5m_fractal_low) + ","
     s := s + "\"timestamp\":\"" + str.tostring(time, "yyyy-MM-dd HH:mm:ss") + "Z\""
     s := s + "}"
     s
