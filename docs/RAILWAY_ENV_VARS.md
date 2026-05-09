@@ -24,7 +24,6 @@ Source files:
 | `MARKETAUX_KEY` | News headlines + entity-tagging for scout. |
 | `FRED_KEY` | Macro data (Fed funds, 10Y, oil, CPI). |
 | `SAHMK_API_KEY` | Saudi (Tadawul) prices via SAHMK API. |
-| `POLYGON_API_KEY` | US intraday aggregates for the AI watcher. |
 | `DATABENTO_API_KEY` | CME ES futures (option-method runner). |
 | `TRADINGVIEW_WEBHOOK_SECRET` | Shared secret for `/webhook/tradingview` Pine alerts. |
 | `RUN_TOKEN` | Bearer token gating the manual `/run` HTTP endpoint. |

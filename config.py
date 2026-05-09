@@ -134,11 +134,6 @@ GOOGLE_SA_JSON = os.getenv("GOOGLE_SA_JSON", "")
 # Free tier: 100 requests/day, 15-min delayed prices.
 SAHMK_API_KEY = os.getenv("SAHMK_API_KEY", "")
 SAHMK_BASE_URL = "https://app.sahmk.sa/api/v1"
-# Polygon.io — US intraday aggregates provider (Phase G prep).
-# Stocks Starter plan: real-time bars on /v2/aggs/ticker.
-# Still in use for the AI watcher / data_router; the option-method
-# runner moved to Databento ES futures for 24h coverage.
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
 # Databento — CME futures (ES) for the option-method runner. ES trades
 # nearly 24h on Globex so the bot can analyze pre/post US session, and
 # ES is the underlying behind TradingView's US500 chart that the

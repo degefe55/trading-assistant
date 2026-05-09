@@ -1,8 +1,8 @@
 """
 Databento data client — CME futures bars (ES, NQ, etc.) via REST.
 
-Mirrors core/polygon_client.py: a dedicated module for one provider
-with its own auth, error handling, and 60-second cache.
+A dedicated module for one provider, with its own auth, error
+handling, and 60-second cache.
 
 Used by the option-method runner in place of Polygon SPY: the bot
 analyzes ES futures because (1) ES trades nearly 24h on Globex so
@@ -76,7 +76,7 @@ def get_bars(symbol: str, timeframe_min: int,
     """Fetch OHLCV bars from Databento. Returns oldest-first list of
     normalized dicts; [] on any failure or missing key.
 
-    Bar shape matches polygon_client.get_bars exactly:
+    Bar shape:
         {"timestamp": ISO, "open", "high", "low", "close", "volume"}
 
     Always fetches ohlcv-1m natively. For 5m/10m we aggregate the 1m
@@ -133,8 +133,7 @@ def get_bars(symbol: str, timeframe_min: int,
 def health_check() -> dict:
     """One-off diagnostic: fetch 1 ES 1-min bar via get_bars + the
     configured METHOD_TICKER. Manual-only — never called by the bot
-    on a schedule. Mirrors polygon_client.health_check shape so a
-    /method_health command can dispatch identically.
+    on a schedule.
     """
     if not _has_key():
         return {"ok": False, "latest_close": None,
@@ -215,8 +214,7 @@ def _fetch_ohlcv_1m(symbol: str, start_dt: datetime,
 
 def _request_text(url: str, params: dict, symbol_for_log: str = "?"):
     """One-shot GET that returns the response body as text (NDJSON)
-    or None on failure. Mirrors polygon_client._request_json's degraded-
-    fail behavior."""
+    or None on failure."""
     try:
         r = _get_session().get(url, params=params, timeout=20)
     except Exception as e:

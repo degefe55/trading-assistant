@@ -3,9 +3,9 @@ method_option — pure rule engine for the options-trading setup.
 
 Five primitive detectors plus one orchestrator (`evaluate_setup`). No
 I/O, no Telegram, no scheduler, no state across calls. Given OHLCV
-bars (the polygon_client output shape), return signal status.
+bars, return signal status.
 
-Bar shape (per core/polygon_client.py._normalize_bars):
+Bar shape:
     {"timestamp": str, "open": float, "high": float, "low": float,
      "close": float, "volume": int}
 
