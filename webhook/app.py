@@ -62,6 +62,10 @@ app = Flask(__name__)
 
 RUN_TOKEN = os.environ.get("RUN_TOKEN", "")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+# Railway's PUBLIC_URL env var omits the scheme; requests.get() then
+# raises MissingSchema and the self-ping fails every 5 minutes.
+if PUBLIC_URL and not PUBLIC_URL.startswith(("http://", "https://")):
+    PUBLIC_URL = "https://" + PUBLIC_URL
 BRIEF_TIMEOUT_SEC = int(os.environ.get("BRIEF_TIMEOUT_SEC", "300"))
 SELF_PING_INTERVAL_SEC = 5 * 60
 SCHEDULE_TICK_SEC = 30
