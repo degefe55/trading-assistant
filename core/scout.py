@@ -19,7 +19,7 @@ from core.logger import log_event
 MIN_MARKET_CAP = 1_000_000_000   # $1B
 MIN_PRICE = 5.00
 MAX_FINALISTS = 3
-HAIKU_SCORE_THRESHOLD = 7  # 0-10 scale, only ≥7 becomes a finalist
+HAIKU_SCORE_THRESHOLD = 6   # was 7 — too narrow, often returned 0 finalists. Lowered to surface medium-relevance opportunities; MAX_FINALISTS=3 still caps output.
 
 
 def scout_opportunities(held_tickers: set, focus_tickers: set,
