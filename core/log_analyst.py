@@ -43,7 +43,7 @@ def is_diagnostic_enabled() -> bool:
 # Defaults — tunable via the function args (manual /diagnose uses 60m).
 WINDOW_MINUTES = 15
 PATTERN_THRESHOLD = 10
-LOG_LOOKBACK_ROWS = 200
+LOG_LOOKBACK_ROWS = 10000
 
 
 # In-memory dedupe keyed by (signature, hour_bucket). Once we alert
