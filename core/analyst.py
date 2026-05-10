@@ -102,7 +102,9 @@ def analyze_ticker(ticker: str, market: str = "US",
 
     price = data_router.get_price(ticker, market=market)
     history = data_router.get_price_history(ticker, 60, market=market)
-    news = data_router.get_news([ticker], hours_back=36, market=market)
+    # 72h spans the full Saudi weekend (Fri-Sat closed) so Sunday-morning briefs catch end-of-week news.
+    news_hours_back = 72 if market == "SA" else 36
+    news = data_router.get_news([ticker], hours_back=news_hours_back, market=market)
     macro = data_router.get_macro(market=market)
     tech = technical.full_technical_snapshot(history)
     earnings = data_router.get_earnings(ticker, market=market)

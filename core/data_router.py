@@ -26,8 +26,28 @@ def get_price_history(ticker: str, days: int = 30,
     if MOCK_MODE:
         return mock_sources.get_mock_price_history(ticker, days)
     if market == "SA":
-        from core import sahmk_client
-        return sahmk_client.get_history(ticker, days)
+        # Switched to yfinance: SAHMK free tier doesn't expose /history/ endpoint
+        try:
+            import yfinance as yf
+            import pandas as pd
+            df = yf.Ticker(f"{ticker}.SR").history(
+                period="3mo", interval="1d")
+            if df is None or df.empty:
+                return []
+            df = df.dropna(subset=["Open", "High", "Low", "Close"])
+            return [{
+                "date": ts.date().isoformat(),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "volume": int(row["Volume"]) if pd.notna(row["Volume"]) else 0,
+            } for ts, row in df.iterrows()]
+        except Exception as e:
+            from core.logger import log_event
+            log_event("WARN", "yfinance",
+                      f"SA history fetch failed for {ticker}.SR: {e}")
+            return []
     from core import live_sources
     return live_sources.get_live_price_history(ticker, days)
 
