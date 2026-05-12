@@ -794,6 +794,13 @@ class MethodSignalTracker:
 _tracker = None
 _tracker_lock = threading.Lock()
 
+# Serializes TradingView webhook events. webhook/app.py spawns one
+# daemon thread per inbound alert, so entry/tp1_hit/tp2_hit can race
+# inside the tracker — producing TP-hit Telegram messages BEFORE the
+# entry message on a fast bar. Holding this lock for the full handler
+# preserves Pine's emit order across sheet writes and Telegram sends.
+_webhook_event_lock = threading.Lock()
+
 
 def get_tracker() -> MethodSignalTracker:
     global _tracker
@@ -809,11 +816,18 @@ def get_tracker() -> MethodSignalTracker:
 def handle_webhook_event(payload: dict) -> dict:
     """Module-level entry point for the TradingView webhook. Routes to
     the singleton tracker. Caller (the webhook endpoint) runs this in a
-    background thread so the HTTP response can return < 200ms."""
+    background thread so the HTTP response can return < 200ms.
+
+    Serialized via _webhook_event_lock: concurrent threads block here
+    and execute in arrival order. Pine emits entry → tp1_hit → tp2_hit
+    on a single bar; without this gate the Telegram sends could land
+    out of order, which is what the May 11 2026 alert sequence showed.
+    """
     if not isinstance(payload, dict):
         log_event("WARN", "method", "webhook payload not a dict")
         return {"ok": False, "error": "payload not dict"}
-    return get_tracker().handle_webhook_event(payload)
+    with _webhook_event_lock:
+        return get_tracker().handle_webhook_event(payload)
 
 
 def get_market_direction() -> tuple:
