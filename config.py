@@ -174,6 +174,14 @@ METHOD_TICKER = os.getenv("METHOD_TICKER", "ES.FUT")
 METHOD_OPTION_PRICE_MIN = float(os.getenv("METHOD_OPTION_PRICE_MIN", "3.00"))
 METHOD_OPTION_PRICE_MAX = float(os.getenv("METHOD_OPTION_PRICE_MAX", "3.90"))
 METHOD_MAX_DAILY_SIGNALS = int(os.getenv("METHOD_MAX_DAILY_SIGNALS", "20"))
+# G.5.3 — Telegram surface toggle for index-level TP hits and the
+# setup_ended event. Default off: friend's exit decisions happen on
+# the option contract chart, so index-level TP pings are noise.
+# Sheet writes (MethodSignals row flags, MethodCooldown bumps,
+# tracker state) are unaffected — they continue regardless.
+METHOD_TELEGRAM_TP_HITS_ENABLED = os.getenv(
+    "METHOD_TELEGRAM_TP_HITS_ENABLED", "false"
+).lower() == "true"
 
 # Phase G.4 — TradingView webhook integration. Pine Script alerts hit
 # /webhook/tradingview with a JSON payload that includes this secret in

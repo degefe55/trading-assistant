@@ -93,3 +93,4 @@ Source files:
 | `METHOD_OPTION_PRICE_MIN` | `3.00` | (Wired in Phase G.3) options price-band floor. |
 | `METHOD_OPTION_PRICE_MAX` | `3.90` | (Wired in Phase G.3) options price-band ceiling. |
 | `METHOD_MAX_DAILY_SIGNALS` | `20` | Daily signal cap. |
+| `METHOD_TELEGRAM_TP_HITS_ENABLED` | `false` | If `true`, fires Telegram alerts for `tp1_hit` / `tp2_hit` / `tp3_hit` AND `setup_ended` events. Default OFF (Phase G.5.3): friend's exit decisions happen on the option contract chart, so index-level TP pings and setup-end notices are noise. Sheet writes (`TP{1,2,3}Hit` flags, MethodSignals state transitions, MethodCooldown bumps) happen unconditionally — only Telegram is suppressed. Flip to `true` to restore the old behavior. |

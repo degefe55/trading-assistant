@@ -21,7 +21,8 @@ import math
 import threading
 from datetime import datetime
 
-from config import (KSA_TZ, METHOD_TICKER, METHOD_MAX_DAILY_SIGNALS)
+from config import (KSA_TZ, METHOD_TICKER, METHOD_MAX_DAILY_SIGNALS,
+                    METHOD_TELEGRAM_TP_HITS_ENABLED)
 from core import method_option, sheets, telegram_client
 from core.logger import log_event
 
@@ -543,6 +544,8 @@ class MethodSignalTracker:
             return self._webhook_invalidated(direction, payload, ticker)
         if event == "setup_ended":
             return self._webhook_setup_ended(direction, payload, ticker)
+        if event == "direction_flip":
+            return self._webhook_direction_flip(direction, payload, ticker)
 
         log_event("WARN", "method", f"webhook unknown event: {event!r}")
         return {"ok": False, "error": f"unknown event: {event}"}
@@ -805,6 +808,62 @@ class MethodSignalTracker:
                   f"{direction} SETUP_END (webhook) {signal_id}")
         return {"ok": True, "setup_ended": True, "signal_id": signal_id}
 
+    def _webhook_direction_flip(self, direction: str, payload: dict,
+                                ticker: str) -> dict:
+        """Direction-flip event from Pine — the setup regime swung
+        from one side to the other on the same bar (prev trend
+        bullish → trend bearish, or vice versa). Audit-only on the
+        sheet: write a MethodSignals row marked Source='direction_flip'
+        so the row exists for backtesting, but do NOT bump
+        MethodCooldown (this isn't a setup — it's a transition
+        observation, must not consume cap) and do NOT touch the
+        per-direction tracker state (Pine's existing setup_ended
+        path force-DONEs the dying side on the same bar; the new
+        side's pre_signal also fires on the same bar). Always
+        Telegram-alerts — friend wants to know."""
+        now = datetime.now(KSA_TZ)
+        date_str = now.strftime("%Y-%m-%d")
+        # Seconds-resolution signal_id so two flips in one minute
+        # don't collide on the sheet (unlikely but cheap).
+        signal_id = (f"{now.strftime('%Y%m%d-%H%M%S')}-FLIP-"
+                     f"{direction.upper()}")
+
+        trigger = _safe_num(payload.get("trigger_price"))
+        stop = _safe_num(payload.get("stop_price"))
+
+        row = {
+            "SignalID": signal_id,
+            "Date": date_str,
+            "Time_KSA": now.strftime("%H:%M:%S"),
+            "Direction": direction,
+            "State": DONE,  # no lifecycle — transition observation
+            "TriggerPrice": trigger if trigger is not None else "",
+            "StopPrice": stop if stop is not None else "",
+            "TP1": "",
+            "TP2": "",
+            "TP3": "",
+            "TP1Hit": "FALSE",
+            "TP2Hit": "FALSE",
+            "TP3Hit": "FALSE",
+            "InvalidatedAt": "",
+            "StateUpdatedAt": now.strftime("%H:%M:%S"),
+            "Source": "direction_flip",
+        }
+        sheets.write_method_state(signal_id, row)
+
+        # The payload's `direction` field IS the new side; the other
+        # side is what we flipped FROM. No ambiguity since the Pine
+        # detector only fires on prev=true → current=true opposite.
+        from_dir = "call" if direction == "put" else "put"
+        _send_direction_flip_alert(ticker, direction, from_dir,
+                                    trigger, stop)
+        log_event("INFO", "method",
+                  f"DIRECTION_FLIP (webhook) {from_dir.upper()}→"
+                  f"{direction.upper()} @ {trigger} stop={stop} "
+                  f"{signal_id}")
+        return {"ok": True, "direction_flip": True,
+                "new_direction": direction, "signal_id": signal_id}
+
 
 # ---------------------------------------------------------------------------
 # Singleton accessor
@@ -922,6 +981,13 @@ def get_today_counters() -> dict:
                     "invalidations": 0}}
     for r in rows:
         if str(r.get("Date", "")).strip() != today:
+            continue
+        # G.5.3 — skip direction_flip audit rows. They share the
+        # MethodSignals table but are transition observations, not
+        # setups; counting them would inflate /menu setups vs
+        # /method status (which reads MethodCooldown, never bumped
+        # for flips).
+        if str(r.get("Source", "")).strip().lower() == "direction_flip":
             continue
         # Reset filter: zero-padded HH:MM:SS strings compare in
         # wall-clock order. Missing or malformed Time_KSA falls
@@ -1228,11 +1294,16 @@ def _send_tp_hit_alert(ticker, direction, tp_label, tp_level):
         f"Price reached <code>{_fmt(tp_level)}</code>. "
         f"Consider taking profit."
     )
-    try:
-        telegram_client.send_message(text)
-    except Exception as e:
-        log_event("WARN", "method", f"TP-hit Telegram failed: {e}")
-    telegram_client.send_to_friend(text)
+    # G.5.3 — gated behind METHOD_TELEGRAM_TP_HITS_ENABLED (default
+    # false). Friend's exits happen on the option contract chart;
+    # index-level TP pings are noise. Sheet writes + tracker state
+    # already happened in _webhook_tp_hit before this is reached.
+    if METHOD_TELEGRAM_TP_HITS_ENABLED:
+        try:
+            telegram_client.send_message(text)
+        except Exception as e:
+            log_event("WARN", "method", f"TP-hit Telegram failed: {e}")
+        telegram_client.send_to_friend(text)
 
 
 def _send_invalidated_alert(ticker, direction, signal_id, stop_level):
@@ -1256,8 +1327,36 @@ def _send_setup_end_alert(ticker, direction, signal_id):
         f"Trend or MACD flipped — tracking stopped.\n"
         f"<i>SignalID: {signal_id}</i>"
     )
+    # G.5.3 — gated behind the same toggle as TP hits. Sheet write
+    # (State=DONE) already happened in _webhook_setup_ended.
+    if METHOD_TELEGRAM_TP_HITS_ENABLED:
+        try:
+            telegram_client.send_message(text)
+        except Exception as e:
+            log_event("WARN", "method", f"setup-end Telegram failed: {e}")
+        telegram_client.send_to_friend(text)
+
+
+def _send_direction_flip_alert(ticker, new_direction, from_direction,
+                                trigger, stop):
+    """G.5.3 — direction-flip alert. Always fires regardless of
+    METHOD_TELEGRAM_TP_HITS_ENABLED; the friend treats this as
+    actionable for any open contract trade. Self-contained: the
+    text carries from-direction, new-direction, trigger price and
+    the relevant pivot, so the friend doesn't need to flip to a
+    chart to interpret it. _fmt handles None gracefully (renders
+    '—') if the payload's trigger/stop arrived unparseable."""
+    op = "below" if new_direction == "put" else "above"
+    text = (
+        f"🔄 <b>DIRECTION FLIP — {ticker}</b>\n"
+        f"{from_direction.upper()} → {new_direction.upper()}\n"
+        f"Triggered at <code>{_fmt(trigger)}</code> "
+        f"(5m close {op} <code>{_fmt(stop)}</code>)\n"
+        f"Reassess any open positions."
+    )
     try:
         telegram_client.send_message(text)
     except Exception as e:
-        log_event("WARN", "method", f"setup-end Telegram failed: {e}")
+        log_event("WARN", "method",
+                  f"direction-flip Telegram failed: {e}")
     telegram_client.send_to_friend(text)
