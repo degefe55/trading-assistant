@@ -728,6 +728,24 @@ class MethodSignalTracker:
         tp_level = (_safe_num(payload.get(tp_label.lower()))
                     or _safe_num(row.get(tp_label)))
 
+        # G.5.1 — defence in depth: reject TP hits whose level is on
+        # the wrong side of the stored entry trigger. CALL TPs must be
+        # > trigger; PUT TPs must be < trigger. Backstop against a bad
+        # Pine deploy that emits sub-entry TPs (see method-alert-bugs.md
+        # Root cause #1) without spamming the chat. If we can't compare
+        # (either side missing), fall through to the existing path.
+        trigger = _safe_num(row.get("TriggerPrice"))
+        if tp_level is not None and trigger is not None:
+            wrong_side = ((direction == "call" and tp_level <= trigger)
+                          or (direction == "put" and tp_level >= trigger))
+            if wrong_side:
+                log_event("WARN", "method",
+                          f"{direction} {tp_label} rejected: level "
+                          f"{tp_level} on wrong side of entry "
+                          f"{trigger} for {signal_id}")
+                return {"ok": True, "noop": "wrong_side_tp",
+                        "signal_id": signal_id}
+
         row[flag_field] = "TRUE"
         row["StateUpdatedAt"] = datetime.now(KSA_TZ).strftime("%H:%M:%S")
         sheets.write_method_state(signal_id, row)
