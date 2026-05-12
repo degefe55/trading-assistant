@@ -17,6 +17,7 @@ Pure rule-engine bits live in core.method_option. This module is the
 side-effect layer: levels computation, Telegram alerts, sheet writes,
 state transitions. No AI calls — cost per tick is $0.
 """
+import math
 import threading
 from datetime import datetime
 
@@ -1118,10 +1119,25 @@ def _fmt(v, dp=2):
 def _send_pre_signal_alert(ticker, direction, trigger_level, levels):
     side = direction.upper()
     op = "above" if direction == "call" else "below"
+
+    # G.5.1 — Pine emits trigger_price=null when the 1m fractal hasn't
+    # printed yet on a fresh setup. Render "waiting for level" rather
+    # than "Watching for 5m close below —", which reads as broken.
+    has_level = (isinstance(trigger_level, (int, float))
+                 and not isinstance(trigger_level, bool)
+                 and math.isfinite(float(trigger_level)))
+
+    if has_level:
+        watch_line = (f"Watching for 5m close {op} "
+                      f"<code>{_fmt(trigger_level)}</code>")
+    else:
+        watch_line = ("Watching for next 1m fractal break "
+                      "(waiting for level).")
+
     text = (
         f"⚡ <b>PRE-SIGNAL — {ticker} {side}</b>\n"
         f"Setup forming: index fractal break (G.5.0)\n"
-        f"Watching for 5m close {op} <code>{_fmt(trigger_level)}</code>\n"
+        f"{watch_line}\n"
         f"Stand by for entry signal."
     )
     try:
