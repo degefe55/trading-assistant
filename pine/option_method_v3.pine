@@ -17,6 +17,15 @@ i_macd_slow   = input.int(26, "MACD Slow", minval=1, group="MACD")
 i_macd_signal = input.int(9, "MACD Signal", minval=1, group="MACD")
 i_vwap_dev2   = input.float(2.0, "VWAP sigma for TP2", minval=0.5, step=0.5, group="VWAP")
 i_vwap_dev3   = input.float(3.0, "VWAP sigma for TP3", minval=0.5, step=0.5, group="VWAP")
+// G.5.2 — TP ladder multipliers. Defaults 1.5x / 2x of
+// swing_range chosen as round-number placeholders. Tune
+// these via the TradingView indicator settings once friend
+// suggests preferred index-level scaling (his own targets
+// are contract-price based and will be wired in Phase G.5
+// contract verifier). minval=1.01 keeps TP2/TP3 strictly
+// above TP1 = 1x.
+i_tp2_mult    = input.float(1.5, "TP2 multiplier (× swing_range)", minval=1.01, step=0.1, group="Targets")
+i_tp3_mult    = input.float(2.0, "TP3 multiplier (× swing_range)", minval=1.01, step=0.1, group="Targets")
 i_lookback    = input.int(30, "Swing lookback bars", minval=5, group="Trend")
 i_show_levels = input.bool(true, "Show TP/Stop lines", group="Display")
 i_show_state  = input.bool(true, "Show state labels", group="Display")
@@ -77,8 +86,9 @@ trend_bullish = not na(last_5m_fractal_high) and close > last_5m_fractal_high
 trend_bearish = not na(last_5m_fractal_low)  and close < last_5m_fractal_low
 
 // ============================================================================
-// VWAP + bands (chart context only — TP2/TP3 dropped in G.5.1; see
-// trading-notes/method-alert-bugs.md Root cause #1)
+// VWAP + bands (chart context only — TPs are entry-relative since
+// G.5.2; see method-alert-bugs.md Root cause #1 for why the original
+// VWAP-band TPs were dropped)
 // ============================================================================
 vwap_value = ta.vwap(hlc3)
 vwap_dev   = ta.stdev(close - vwap_value, i_lookback)
@@ -90,20 +100,28 @@ vwap_dn_3  = vwap_value - i_vwap_dev3 * vwap_dev
 // ============================================================================
 // STATE MACHINE STORAGE
 // ============================================================================
-// G.5.1 — TP2/TP3 removed (VWAP-band TPs could land on the wrong side
-// of entry; see method-alert-bugs.md Root cause #1). TP1 (entry +
-// swing_range, entry-relative) is the only remaining take-profit.
+// G.5.2 — TP ladder restored. Math is entry-relative now (G.5.1
+// briefly dropped the VWAP-band version because it could land on the
+// wrong side of entry; see method-alert-bugs.md Root cause #1).
 var int   call_state = 0
 var float call_entry = na
 var float call_stop  = na
 var float call_tp1   = na
+var float call_tp2   = na
+var float call_tp3   = na
 var bool  call_tp1_hit = false
+var bool  call_tp2_hit = false
+var bool  call_tp3_hit = false
 
 var int   put_state = 0
 var float put_entry = na
 var float put_stop  = na
 var float put_tp1   = na
+var float put_tp2   = na
+var float put_tp3   = na
 var bool  put_tp1_hit = false
+var bool  put_tp2_hit = false
+var bool  put_tp3_hit = false
 
 // ============================================================================
 // PAYLOAD HELPER (all params explicitly typed)
@@ -154,17 +172,35 @@ if entry_trigger_call
     call_entry := close
     call_stop  := last_5m_fractal_low
     swing_range_c = math.abs(last_5m_fractal_high - last_5m_fractal_low)
+    // G.5.2 — entry-relative TP ladder. TP1 = 1x swing_range;
+    // TP2/TP3 use input multipliers (defaults 1.5x / 2.0x,
+    // tunable in TradingView indicator settings). Previously
+    // absolute VWAP bands which could land on the wrong side
+    // of entry on a strong trend (May 11 2026 bug). All three
+    // TPs guaranteed favorable by construction —
+    // i_tp{2,3}_mult have minval=1.01.
     call_tp1 := call_entry + swing_range_c
+    call_tp2 := call_entry + i_tp2_mult * swing_range_c
+    call_tp3 := call_entry + i_tp3_mult * swing_range_c
     call_tp1_hit := false
-    alert(f_payload("entry", "call", call_entry, call_stop, call_tp1, NA_F, NA_F), alert.freq_once_per_bar)
+    call_tp2_hit := false
+    call_tp3_hit := false
+    alert(f_payload("entry", "call", call_entry, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
 
 if call_state == 2
     if not call_tp1_hit and high >= call_tp1
         call_tp1_hit := true
-        alert(f_payload("tp1_hit", "call", call_tp1, call_stop, call_tp1, NA_F, NA_F), alert.freq_once_per_bar)
+        alert(f_payload("tp1_hit", "call", call_tp1, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
+    if not call_tp2_hit and high >= call_tp2
+        call_tp2_hit := true
+        alert(f_payload("tp2_hit", "call", call_tp2, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
+    if not call_tp3_hit and high >= call_tp3
+        call_tp3_hit := true
+        call_state := 3
+        alert(f_payload("tp3_hit", "call", call_tp3, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
     if barstate.isconfirmed and close < call_stop and call_state == 2
         call_state := 3
-        alert(f_payload("invalidated", "call", close, call_stop, call_tp1, NA_F, NA_F), alert.freq_once_per_bar)
+        alert(f_payload("invalidated", "call", close, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
 
 if (call_state == 1 or call_state == 2) and not trend_bullish
     call_state := 3
@@ -191,17 +227,30 @@ if entry_trigger_put
     put_entry := close
     put_stop  := last_5m_fractal_high
     swing_range_p = math.abs(last_5m_fractal_high - last_5m_fractal_low)
+    // G.5.2 — entry-relative TP ladder (mirror of CALL — see CALL
+    // entry block above for rationale).
     put_tp1 := put_entry - swing_range_p
+    put_tp2 := put_entry - i_tp2_mult * swing_range_p
+    put_tp3 := put_entry - i_tp3_mult * swing_range_p
     put_tp1_hit := false
-    alert(f_payload("entry", "put", put_entry, put_stop, put_tp1, NA_F, NA_F), alert.freq_once_per_bar)
+    put_tp2_hit := false
+    put_tp3_hit := false
+    alert(f_payload("entry", "put", put_entry, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
 
 if put_state == 2
     if not put_tp1_hit and low <= put_tp1
         put_tp1_hit := true
-        alert(f_payload("tp1_hit", "put", put_tp1, put_stop, put_tp1, NA_F, NA_F), alert.freq_once_per_bar)
+        alert(f_payload("tp1_hit", "put", put_tp1, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
+    if not put_tp2_hit and low <= put_tp2
+        put_tp2_hit := true
+        alert(f_payload("tp2_hit", "put", put_tp2, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
+    if not put_tp3_hit and low <= put_tp3
+        put_tp3_hit := true
+        put_state := 3
+        alert(f_payload("tp3_hit", "put", put_tp3, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
     if barstate.isconfirmed and close > put_stop and put_state == 2
         put_state := 3
-        alert(f_payload("invalidated", "put", close, put_stop, put_tp1, NA_F, NA_F), alert.freq_once_per_bar)
+        alert(f_payload("invalidated", "put", close, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
 
 if (put_state == 1 or put_state == 2) and not trend_bearish
     put_state := 3
@@ -216,10 +265,14 @@ if put_state == 3 and not put_setup_active
 plot(i_show_levels and call_state == 2 ? call_entry : na, "Call Entry", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
 plot(i_show_levels and call_state == 2 ? call_stop  : na, "Call Stop",  color=color.new(color.red, 0),   style=plot.style_linebr, linewidth=1)
 plot(i_show_levels and call_state == 2 ? call_tp1   : na, "Call TP1",   color=color.new(color.aqua, 0),  style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and call_state == 2 ? call_tp2   : na, "Call TP2",   color=color.new(color.yellow, 0),style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and call_state == 2 ? call_tp3   : na, "Call TP3",   color=color.new(color.orange, 0),style=plot.style_linebr, linewidth=1)
 
 plot(i_show_levels and put_state == 2 ? put_entry : na, "Put Entry", color=color.new(color.maroon, 0), style=plot.style_linebr, linewidth=2)
 plot(i_show_levels and put_state == 2 ? put_stop  : na, "Put Stop",  color=color.new(color.red, 0),    style=plot.style_linebr, linewidth=1)
 plot(i_show_levels and put_state == 2 ? put_tp1   : na, "Put TP1",   color=color.new(color.aqua, 0),   style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and put_state == 2 ? put_tp2   : na, "Put TP2",   color=color.new(color.yellow, 0), style=plot.style_linebr, linewidth=1)
+plot(i_show_levels and put_state == 2 ? put_tp3   : na, "Put TP3",   color=color.new(color.orange, 0), style=plot.style_linebr, linewidth=1)
 
 plot(vwap_value, "VWAP", color=color.new(color.blue, 0))
 plot(vwap_up_2, "VWAP +2sigma", color=color.new(color.yellow, 50))
