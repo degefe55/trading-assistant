@@ -9,7 +9,7 @@ immediately so the Telegram webhook doesn't time out.
 import re
 import os
 from datetime import datetime
-from config import KSA_TZ, TELEGRAM_CHAT_ID, ACTIVE_MARKETS
+from config import KSA_TZ, TELEGRAM_CHAT_ID, FRIEND_CHAT_ID, ACTIVE_MARKETS
 from core import telegram_client, trades, sheets
 from core.logger import log_event
 
@@ -77,6 +77,17 @@ def process_commands() -> int:
 
         msg = update.get("message", {})
         chat_id = str(msg.get("chat", {}).get("id", ""))
+
+        # Friend forwarding (G.5.2): friend's chat is read-only —
+        # silent-drop with INFO log so misclicks are auditable but
+        # the bot stays mute toward him.
+        if FRIEND_CHAT_ID and chat_id == str(FRIEND_CHAT_ID):
+            text_in = (msg.get("text") or "").strip()
+            log_event("INFO", "commands",
+                      f"Friend command ignored (read-only): "
+                      f"{text_in[:60]!r}")
+            continue
+
         if chat_id != str(TELEGRAM_CHAT_ID):
             log_event("WARN", "commands", f"Ignored message from chat {chat_id}")
             continue

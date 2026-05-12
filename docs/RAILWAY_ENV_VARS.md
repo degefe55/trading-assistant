@@ -77,6 +77,12 @@ Source files:
 | `WATCHER_INCLUDE_WATCHLIST` | `false` | Cover watchlist tickers, not just held positions. |
 | `WATCHER_DAILY_ALERT_CAP` | `3` | Per-ticker per-day alert cap. |
 
+## Friend forwarding (Phase G.5.2 — read-only method alerts)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `FRIEND_CHAT_ID` | (unset) | Optional. If set, forwards every method-flow alert (pre_signal, entry, tp1/2/3 hits, invalidated, setup_ended, user-cancel) to this Telegram chat for read-only review. Friend's chat is silent-dropped on any inbound message or button tap — they cannot run commands. Brief outputs, /buy /sell, watcher alerts, and error messages are NOT forwarded. Inline keyboards (the 🛑 cancel button on entry alerts) are stripped from the forwarded copy. |
+
 ## Method runner (Phase G.2 — option-method)
 
 | Var | Default | Purpose |

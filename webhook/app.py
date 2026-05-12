@@ -51,7 +51,7 @@ os.environ.setdefault("ACTIVE_MARKETS", "US")
 
 from core import commands, telegram_client, sheets
 from core.logger import log_event, get_log_buffer
-from config import (TELEGRAM_CHAT_ID, KSA_TZ, ACTIVE_MARKETS,
+from config import (TELEGRAM_CHAT_ID, FRIEND_CHAT_ID, KSA_TZ, ACTIVE_MARKETS,
                     WATCHER_PRICE_INTERVAL_MIN, WATCHER_NEWS_INTERVAL_MIN,
                     METHOD_INTERVAL_SEC, TRADINGVIEW_WEBHOOK_SECRET,
                     MAX_LOG_ROWS, DIAGNOSTIC_AGENT_ENABLED)
@@ -427,6 +427,19 @@ def telegram_webhook():
 
         msg = update.get("message", {})
         chat_id = str(msg.get("chat", {}).get("id", ""))
+
+        # Friend forwarding (G.5.2): friend's chat is read-only. Any
+        # inbound text is silent-dropped — log it so misclicks are
+        # visible in Logs, but don't reply (would feel like a broken
+        # bot if his keyboard auto-completes a slash command).
+        if FRIEND_CHAT_ID and chat_id == str(FRIEND_CHAT_ID):
+            text_in = (msg.get("text") or "").strip()
+            log_event("INFO", "webhook",
+                      f"Friend message ignored (read-only): "
+                      f"{text_in[:60]!r}")
+            return jsonify({"ok": True,
+                            "ignored": "friend read-only"}), 200
+
         if chat_id != str(TELEGRAM_CHAT_ID):
             return jsonify({"ok": True, "ignored": "wrong chat"}), 200
 
@@ -535,6 +548,18 @@ def _handle_callback_query(cb: dict):
     cb_chat_id = str((msg.get("chat") or {}).get("id", ""))
 
     log_event("INFO", "webhook", f"Callback received: data={data}")
+
+    # Friend forwarding (G.5.2): friend is read-only. send_to_friend
+    # strips inline keyboards so this branch shouldn't normally fire,
+    # but a forwarded message or a stale alert can still produce a
+    # tap — silently ack so the button stops spinning, no toast.
+    if FRIEND_CHAT_ID and cb_chat_id == str(FRIEND_CHAT_ID):
+        telegram_client.answer_callback_query(cb_id)
+        log_event("INFO", "webhook",
+                  f"Friend callback ignored (read-only): "
+                  f"{data[:60]!r}")
+        return jsonify({"ok": True,
+                        "ignored": "friend read-only"}), 200
 
     # Security: ignore button taps from any chat that isn't ours
     if cb_chat_id and cb_chat_id != str(TELEGRAM_CHAT_ID):
