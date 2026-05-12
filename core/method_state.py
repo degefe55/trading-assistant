@@ -499,10 +499,10 @@ class MethodSignalTracker:
         log_event("INFO", "method",
                   f"{direction} signal {signal_id} closed (reason={reason})")
         if notify:
-            telegram_client.send_message(
-                f"🛑 <b>{METHOD_TICKER} {direction.upper()}</b> "
-                f"tracking cancelled.",
-            )
+            msg = (f"🛑 <b>{METHOD_TICKER} {direction.upper()}</b> "
+                   f"tracking cancelled.")
+            telegram_client.send_message(msg)
+            telegram_client.send_to_friend(msg)
 
     def cancel_signal_by_id(self, signal_id: str) -> bool:
         """Honor the 🛑 inline button. Returns True if the signal was
@@ -1144,6 +1144,7 @@ def _send_pre_signal_alert(ticker, direction, trigger_level, levels):
         telegram_client.send_message(text)
     except Exception as e:
         log_event("WARN", "method", f"pre-signal Telegram failed: {e}")
+    telegram_client.send_to_friend(text)
 
 
 def _send_entry_alert(ticker, direction, signal_id, entry_price,
@@ -1185,6 +1186,9 @@ def _send_entry_alert(ticker, direction, signal_id, entry_price,
                           f"MessageMap write failed for entry alert: {e}")
     except Exception as e:
         log_event("WARN", "method", f"entry alert Telegram failed: {e}")
+    # Friend forwarding (G.5.2): keyboard deliberately not passed —
+    # friend has no action authority, so the 🛑 button stays user-only.
+    telegram_client.send_to_friend(text)
 
 
 def _send_tp_hit_alert(ticker, direction, tp_label, tp_level):
@@ -1197,6 +1201,7 @@ def _send_tp_hit_alert(ticker, direction, tp_label, tp_level):
         telegram_client.send_message(text)
     except Exception as e:
         log_event("WARN", "method", f"TP-hit Telegram failed: {e}")
+    telegram_client.send_to_friend(text)
 
 
 def _send_invalidated_alert(ticker, direction, signal_id, stop_level):
@@ -1211,6 +1216,7 @@ def _send_invalidated_alert(ticker, direction, signal_id, stop_level):
         telegram_client.send_message(text)
     except Exception as e:
         log_event("WARN", "method", f"invalidated Telegram failed: {e}")
+    telegram_client.send_to_friend(text)
 
 
 def _send_setup_end_alert(ticker, direction, signal_id):
@@ -1223,3 +1229,4 @@ def _send_setup_end_alert(ticker, direction, signal_id):
         telegram_client.send_message(text)
     except Exception as e:
         log_event("WARN", "method", f"setup-end Telegram failed: {e}")
+    telegram_client.send_to_friend(text)

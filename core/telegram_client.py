@@ -14,7 +14,7 @@ Phase changes:
 - answer_callback_query() added so we can acknowledge inline-button taps.
 """
 import requests
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, FRIEND_CHAT_ID
 from core.logger import log_event
 
 
@@ -103,6 +103,53 @@ def _split_message(text: str, chunk_size: int) -> list:
     if current:
         chunks.append("\n".join(current))
     return chunks
+
+
+def send_to_friend(text: str, parse_mode: str = "HTML",
+                   disable_preview: bool = True):
+    """Forward a method-alert message to FRIEND_CHAT_ID for read-only
+    review. Silent no-op if FRIEND_CHAT_ID is unset.
+
+    Inline keyboards are deliberately NOT forwarded — friend has no
+    action authority on this bot, and a dead button (taps would be
+    silent-dropped by the callback router) is worse UX than no button.
+
+    Failure to send is logged WARN but never raised — the primary
+    chat's alert path must not break because the friend's chat is
+    unreachable. Long messages are split at line boundaries the same
+    way the primary send does it.
+
+    Returns the first chunk's Telegram message_id on success, or None
+    (forwarding disabled OR send failed). Callers ignore the return —
+    we don't track friend message ids in MessageMap.
+    """
+    if not FRIEND_CHAT_ID or not TELEGRAM_BOT_TOKEN:
+        return None
+
+    parts = _split_message(text, 3900) if len(text) > 4000 else [text]
+    first_id = None
+    for part in parts:
+        payload = {
+            "chat_id": FRIEND_CHAT_ID,
+            "text": part,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": disable_preview,
+        }
+        try:
+            r = requests.post(f"{TG_BASE}/sendMessage", json=payload,
+                              timeout=15)
+            r.raise_for_status()
+            mid = (r.json().get("result") or {}).get("message_id")
+            if first_id is None:
+                first_id = mid
+            log_event("INFO", "telegram",
+                      f"Forwarded to friend ({len(part)} chars, "
+                      f"id={mid})")
+        except Exception as e:
+            log_event("WARN", "telegram",
+                      f"Forward to friend failed: {e}")
+            return None
+    return first_id
 
 
 def send_error_alert(error: str, context: dict = None):

@@ -127,6 +127,10 @@ MARKETAUX_KEY = os.getenv("MARKETAUX_KEY", "")
 FRED_KEY = os.getenv("FRED_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# Friend forwarding (Phase G.5.2). Read-only: friend receives method
+# alerts but cannot issue commands or tap inline buttons. Unset →
+# forwarding off. Set to friend's Telegram chat ID to enable.
+FRIEND_CHAT_ID = os.getenv("FRIEND_CHAT_ID", "")
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL", "")
 # Service account JSON for writing to Google Sheets (added Phase B)
 GOOGLE_SA_JSON = os.getenv("GOOGLE_SA_JSON", "")
