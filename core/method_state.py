@@ -888,8 +888,31 @@ def get_today_counters() -> dict:
     METHOD_MAX_DAILY_SIGNALS × 2 directions) and filters by today's
     Date. Counters use the row state, not the strict event sequence —
     e.g. a row that reached TRACKING is counted as both a setup and
-    an entry."""
+    an entry.
+
+    Honors METHOD_LAST_RESET in the Config tab (written by
+    /method reset): rows whose Time_KSA precedes the stored
+    reset are excluded so /menu aligns with /method status
+    (which reads MethodCooldown, wiped by reset). If the
+    stored timestamp's date doesn't match today (midnight
+    rollover, or stale value), no filter applies."""
     today = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
+
+    # Determine the reset cutoff. Empty = no filter.
+    last_reset_hhmmss = ""
+    try:
+        cfg = sheets.read_config() or {}
+        raw = str(cfg.get("METHOD_LAST_RESET", "") or "").strip()
+        if raw:
+            # Expected "YYYY-MM-DD HH:MM:SS" (KSA, no TZ suffix).
+            parts = raw.split(" ", 1)
+            if len(parts) == 2 and parts[0] == today:
+                last_reset_hhmmss = parts[1]
+    except Exception as e:
+        log_event("WARN", "method",
+                  f"get_today_counters: "
+                  f"METHOD_LAST_RESET read failed: {e}")
+
     rows = sheets.read_method_signals(limit=200) or []
     out = {"call": {"setups": 0, "entries": 0,
                     "tp1_hits": 0, "tp2_hits": 0, "tp3_hits": 0,
@@ -900,6 +923,14 @@ def get_today_counters() -> dict:
     for r in rows:
         if str(r.get("Date", "")).strip() != today:
             continue
+        # Reset filter: zero-padded HH:MM:SS strings compare in
+        # wall-clock order. Missing or malformed Time_KSA falls
+        # through and the row is included — we'd rather over-count
+        # than lose an audit row to a parse failure.
+        if last_reset_hhmmss:
+            t = str(r.get("Time_KSA", "") or "").strip()
+            if t and len(t) >= 8 and t < last_reset_hhmmss:
+                continue
         d = str(r.get("Direction", "")).strip().lower()
         if d not in out:
             continue

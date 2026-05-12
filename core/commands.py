@@ -1252,7 +1252,8 @@ def _cmd_method_status() -> str:
 def _cmd_method_reset() -> str:
     """Force-DONE all active signals + clear today's cooldown rows.
     In-memory tracker is wiped too so the next tick starts clean."""
-    today_str = datetime.now(KSA_TZ).strftime("%Y-%m-%d")
+    now = datetime.now(KSA_TZ)
+    today_str = now.strftime("%Y-%m-%d")
     sheet_signals_ok = sheets.reset_method_signals_active()
     sheet_cd_ok = sheets.reset_method_cooldown(today_str)
     try:
@@ -1261,11 +1262,26 @@ def _cmd_method_reset() -> str:
     except Exception as e:
         return f"❌ Tracker reset failed: {e}"
 
+    # Persist reset timestamp so /menu's MethodSignals-based counters
+    # know to skip rows older than this. Without it, /menu Setups
+    # would still show pre-reset values because force-DONEing rows
+    # leaves them matching today's Date filter. /method status reads
+    # MethodCooldown (cleared above) so it doesn't need this.
+    reset_ts_value = now.strftime("%Y-%m-%d %H:%M:%S")
+    reset_ts_ok = sheets.write_config("METHOD_LAST_RESET", reset_ts_value)
+    log_event("INFO", "method",
+              f"Reset by user: today={today_str} "
+              f"signals_ok={sheet_signals_ok} cd_ok={sheet_cd_ok} "
+              f"reset_ts_ok={reset_ts_ok}")
+
     notes = []
     if not sheet_signals_ok:
         notes.append("MethodSignals reset failed (see Logs)")
     if not sheet_cd_ok:
         notes.append(f"MethodCooldown reset for {today_str} failed")
+    if not reset_ts_ok:
+        notes.append("Reset timestamp not persisted "
+                     "(menu may show stale counts)")
     suffix = ("\n<i>" + "; ".join(notes) + "</i>") if notes else ""
     return ("🔄 <b>Method state reset</b>\n"
             "  • In-memory tracker cleared\n"
