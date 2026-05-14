@@ -68,16 +68,18 @@ macd_put_aligned  = aligned_10m_bear and aligned_1m_bear
 // ============================================================================
 // FRACTAL DETECTION (parameterized — G.5.4)
 // ============================================================================
-last_5m_fractal_high = ta.valuewhen(ta.pivothigh(i_fractal_radius_5m, i_fractal_radius_5m), high[i_fractal_radius_5m], 0)
-last_5m_fractal_low  = ta.valuewhen(ta.pivotlow(i_fractal_radius_5m,  i_fractal_radius_5m), low[i_fractal_radius_5m],  0)
+ph_5m = ta.pivothigh(i_fractal_radius_5m, i_fractal_radius_5m)
+pl_5m = ta.pivotlow(i_fractal_radius_5m,  i_fractal_radius_5m)
+last_5m_fractal_high = ta.valuewhen(not na(ph_5m), ph_5m, 0)
+last_5m_fractal_low  = ta.valuewhen(not na(pl_5m), pl_5m, 0)
 
 // G.4.3 — only the 1m fractal levels are still consumed (entry trigger
 // uses the 5-min `close` directly per G.4.2). The 1m close request
 // here was removed as dead code.
 [fh_1m, fl_1m] = request.security(syminfo.tickerid, "1",
      [
-       ta.valuewhen(ta.pivothigh(i_fractal_radius_1m, i_fractal_radius_1m), high[i_fractal_radius_1m], 0),
-       ta.valuewhen(ta.pivotlow(i_fractal_radius_1m,  i_fractal_radius_1m), low[i_fractal_radius_1m],  0)
+       ta.valuewhen(not na(ta.pivothigh(i_fractal_radius_1m, i_fractal_radius_1m)), ta.pivothigh(i_fractal_radius_1m, i_fractal_radius_1m), 0),
+       ta.valuewhen(not na(ta.pivotlow(i_fractal_radius_1m,  i_fractal_radius_1m)), ta.pivotlow(i_fractal_radius_1m,  i_fractal_radius_1m), 0)
      ],
      barmerge.gaps_off, barmerge.lookahead_off)
 
