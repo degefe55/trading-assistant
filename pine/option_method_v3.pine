@@ -258,7 +258,7 @@ prev_trend_bearish := trend_bearish
 // Until then, every fractal break fires pre_signal.
 call_setup_active = trend_bullish
 
-if call_state == 0 and call_setup_active
+if barstate.isconfirmed and call_state == 0 and call_setup_active
     call_state := 1
     // G.5.1: trigger_price reports the 1m fractal high (the actual
     // entry-trigger level). Was `close` previously, which made the bot's
@@ -266,9 +266,9 @@ if call_state == 0 and call_setup_active
     // meaningless. fractal_high_1m may be na if no 1m fractal has
     // printed yet on this setup; the bot handles "null" via
     // _safe_num → None and renders fallback "waiting for level" text.
-    alert(f_payload("pre_signal", "call", fractal_high_1m, call_reference_high, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
+    alert(f_payload("pre_signal", "call", fractal_high_1m, call_reference_high, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
 
-entry_trigger_call = call_state == 1 and not na(fractal_high_1m) and close > fractal_high_1m
+entry_trigger_call = barstate.isconfirmed and call_state == 1 and not na(fractal_high_1m) and close > fractal_high_1m
 
 if entry_trigger_call
     call_state := 2
@@ -288,7 +288,7 @@ if entry_trigger_call
     call_tp1_hit := false
     call_tp2_hit := false
     call_tp3_hit := false
-    alert(f_payload("entry", "call", call_entry, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar)
+    alert(f_payload("entry", "call", call_entry, call_stop, call_tp1, call_tp2, call_tp3), alert.freq_once_per_bar_close)
 
 if call_state == 2
     if not call_tp1_hit and high >= call_tp1
@@ -317,13 +317,13 @@ if call_state == 3 and not call_setup_active
 // ============================================================================
 put_setup_active = trend_bearish
 
-if put_state == 0 and put_setup_active
+if barstate.isconfirmed and put_state == 0 and put_setup_active
     put_state := 1
     // G.5.1: trigger_price reports the 1m fractal low. See CALL-side
     // comment above for rationale.
-    alert(f_payload("pre_signal", "put", fractal_low_1m, put_reference_low, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
+    alert(f_payload("pre_signal", "put", fractal_low_1m, put_reference_low, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
 
-entry_trigger_put = put_state == 1 and not na(fractal_low_1m) and close < fractal_low_1m
+entry_trigger_put = barstate.isconfirmed and put_state == 1 and not na(fractal_low_1m) and close < fractal_low_1m
 
 if entry_trigger_put
     put_state := 2
@@ -338,7 +338,7 @@ if entry_trigger_put
     put_tp1_hit := false
     put_tp2_hit := false
     put_tp3_hit := false
-    alert(f_payload("entry", "put", put_entry, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar)
+    alert(f_payload("entry", "put", put_entry, put_stop, put_tp1, put_tp2, put_tp3), alert.freq_once_per_bar_close)
 
 if put_state == 2
     if not put_tp1_hit and low <= put_tp1
