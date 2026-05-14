@@ -101,13 +101,9 @@ var bool last_break_bearish = false
 var float break_anchor_high = na
 var float break_anchor_low  = na
 
-new_bullish_break = not na(last_5m_fractal_high) and
-                    high > last_5m_fractal_high and
-                    not last_break_bullish
+new_bullish_break = not na(last_5m_fractal_high) and high > last_5m_fractal_high and not last_break_bullish
 
-new_bearish_break = not na(last_5m_fractal_low) and
-                    low < last_5m_fractal_low and
-                    not last_break_bearish
+new_bearish_break = not na(last_5m_fractal_low) and low < last_5m_fractal_low and not last_break_bearish
 
 if new_bullish_break
     last_break_bullish := true
