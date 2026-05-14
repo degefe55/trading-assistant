@@ -30,6 +30,24 @@ i_lookback    = input.int(30, "Swing lookback bars", minval=5, group="Trend")
 i_show_levels = input.bool(true, "Show TP/Stop lines", group="Display")
 i_show_state  = input.bool(true, "Show state labels", group="Display")
 
+// G.5.4 — Fractal detection radius. ta.pivothigh(N, N)
+// requires N lower-high bars on each side to qualify a
+// pivot. Larger N filters out shallow noise pivots and
+// surfaces dominant structural ones. Yesterday's May 12
+// PUT alert quoted a level off a small recent peak when
+// the dominant peak was ~13 points lower and further
+// back — that gap is what these inputs control.
+//
+// KNOWN BEHAVIOR: ta.pivothigh confirmation is delayed by
+// N bars. radius=5 on 5m = 25min delay before a pivot is
+// confirmed. radius=10 = 50min delay. Friend should know.
+//
+// TUNING: increase if alerts still pick small intraday
+// noise; decrease if dominant pivots are being missed
+// because they don't have N quiet bars on either side.
+i_fractal_radius_5m = input.int(5, "5m fractal radius", minval=2, maxval=30, step=1, group="Pivots")
+i_fractal_radius_1m = input.int(3, "1m fractal radius", minval=2, maxval=15, step=1, group="Pivots")
+
 // ============================================================================
 // MACD ALIGNMENT
 // ============================================================================
@@ -48,26 +66,18 @@ macd_call_aligned = aligned_10m_bull and aligned_1m_bull
 macd_put_aligned  = aligned_10m_bear and aligned_1m_bear
 
 // ============================================================================
-// FRACTAL DETECTION (5-bar Bill Williams)
+// FRACTAL DETECTION (parameterized — G.5.4)
 // ============================================================================
-is_fractal_high_5m = high[2] > high[3] and high[2] > high[4] and high[2] > high[1] and high[2] > high[0]
-is_fractal_low_5m  = low[2]  < low[3]  and low[2]  < low[4]  and low[2]  < low[1]  and low[2]  < low[0]
-
-var float last_5m_fractal_high = na
-var float last_5m_fractal_low  = na
-
-if is_fractal_high_5m
-    last_5m_fractal_high := high[2]
-if is_fractal_low_5m
-    last_5m_fractal_low := low[2]
+last_5m_fractal_high = ta.valuewhen(ta.pivothigh(i_fractal_radius_5m, i_fractal_radius_5m), high[i_fractal_radius_5m], 0)
+last_5m_fractal_low  = ta.valuewhen(ta.pivotlow(i_fractal_radius_5m,  i_fractal_radius_5m), low[i_fractal_radius_5m],  0)
 
 // G.4.3 — only the 1m fractal levels are still consumed (entry trigger
 // uses the 5-min `close` directly per G.4.2). The 1m close request
 // here was removed as dead code.
 [fh_1m, fl_1m] = request.security(syminfo.tickerid, "1",
      [
-       (high[2] > high[3] and high[2] > high[4] and high[2] > high[1] and high[2] > high[0]) ? high[2] : na,
-       (low[2]  < low[3]  and low[2]  < low[4]  and low[2]  < low[1]  and low[2]  < low[0])  ? low[2]  : na
+       ta.valuewhen(ta.pivothigh(i_fractal_radius_1m, i_fractal_radius_1m), high[i_fractal_radius_1m], 0),
+       ta.valuewhen(ta.pivotlow(i_fractal_radius_1m,  i_fractal_radius_1m), low[i_fractal_radius_1m],  0)
      ],
      barmerge.gaps_off, barmerge.lookahead_off)
 
