@@ -260,15 +260,18 @@ call_setup_active = trend_bullish
 
 if barstate.isconfirmed and call_state == 0 and call_setup_active
     call_state := 1
-    // G.5.1: trigger_price reports the 1m fractal high (the actual
-    // entry-trigger level). Was `close` previously, which made the bot's
-    // alert text read "Watching for 5m close above <current_close>" —
-    // meaningless. fractal_high_1m may be na if no 1m fractal has
-    // printed yet on this setup; the bot handles "null" via
-    // _safe_num → None and renders fallback "waiting for level" text.
-    alert(f_payload("pre_signal", "call", fractal_high_1m, call_reference_high, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
+    // G.5.7: trigger_price reports call_reference_high (the
+    // leg-aware structural reference set when a new leg low
+    // prints — see G.5.5 block above). Was fractal_high_1m
+    // through G.5.6, which quoted micro 1m levels instead of
+    // the structural setup level friend uses (~10 point gap
+    // observed May 14). call_reference_high may be na before
+    // any leg-aware snapshot has been taken on the current
+    // setup; the bot handles "null" via _safe_num → None and
+    // renders fallback "waiting for level" text.
+    alert(f_payload("pre_signal", "call", call_reference_high, call_reference_high, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
 
-entry_trigger_call = barstate.isconfirmed and call_state == 1 and not na(fractal_high_1m) and close > fractal_high_1m
+entry_trigger_call = barstate.isconfirmed and call_state == 1 and not na(call_reference_high) and close > call_reference_high
 
 if entry_trigger_call
     call_state := 2
@@ -321,9 +324,9 @@ if barstate.isconfirmed and put_state == 0 and put_setup_active
     put_state := 1
     // G.5.1: trigger_price reports the 1m fractal low. See CALL-side
     // comment above for rationale.
-    alert(f_payload("pre_signal", "put", fractal_low_1m, put_reference_low, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
+    alert(f_payload("pre_signal", "put", put_reference_low, put_reference_low, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
 
-entry_trigger_put = barstate.isconfirmed and put_state == 1 and not na(fractal_low_1m) and close < fractal_low_1m
+entry_trigger_put = barstate.isconfirmed and put_state == 1 and not na(put_reference_low) and close < put_reference_low
 
 if entry_trigger_put
     put_state := 2
