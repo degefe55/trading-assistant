@@ -250,6 +250,97 @@ prev_trend_bullish := trend_bullish
 prev_trend_bearish := trend_bearish
 
 // ============================================================================
+// REGIME FILTER (G.5.8)
+// ============================================================================
+// Friend's rule (confirmed in Arabic May 16): the market sits
+// in a regime (CALL or PUT) on the 5m chart. Setups only arm
+// in the regime direction. Regime stays put until a 5m candle
+// CLOSES past the structural level on the opposite side of
+// the dominant extreme. Wick breaks do NOT flip the regime.
+//
+// CALL regime: track dominant HIGH of the up-leg;
+// regime_flip_level = swing low directly below it (the
+// "white line below"). Flip to PUT on 5m close < that level.
+//
+// PUT regime: mirror. Track dominant LOW; regime_flip_level
+// = swing high above it. Flip to CALL on 5m close > that.
+//
+// First structural break of each RTH session establishes the
+// regime. New RTH session resets regime to "none".
+//
+// Dominant tracking is intra-bar (same pattern as G.5.5 leg
+// tracking). The flip TEST is gated on barstate.isconfirmed
+// — the level being tested can shift intra-bar; only the
+// final close decides.
+var string regime = "none"
+var float regime_flip_level    = na
+var float regime_dominant_high = na
+var float regime_dominant_low  = na
+
+// Session reset
+if session.isfirstbar_regular
+    regime := "none"
+    regime_flip_level := na
+    regime_dominant_high := na
+    regime_dominant_low := na
+
+// Regime initialization on first structural break of session
+if regime == "none"
+    if new_bullish_break
+        regime := "call"
+        regime_dominant_high := high
+        regime_flip_level := last_5m_fractal_low
+    else if new_bearish_break
+        regime := "put"
+        regime_dominant_low := low
+        regime_flip_level := last_5m_fractal_high
+
+// Dominant-extreme tracking (intra-bar). regime_flip_level
+// re-anchors each time the dominant extreme moves — snapshot
+// the most recent confirmed fractal on the opposite side,
+// which is guaranteed to predate the new extreme by ≥2 bars
+// (Bill Williams confirmation lag).
+if regime == "call" and (na(regime_dominant_high) or high > regime_dominant_high)
+    regime_dominant_high := high
+    regime_flip_level := last_5m_fractal_low
+
+if regime == "put" and (na(regime_dominant_low) or low < regime_dominant_low)
+    regime_dominant_low := low
+    regime_flip_level := last_5m_fractal_high
+
+// Regime flip on confirmed 5m close past regime_flip_level.
+// Force-cancel the old direction's active setup (state 1 or
+// 2 → 3, fire setup_ended) BEFORE force-arming the new
+// direction (state 0 → 1, fire pre_signal). Same-bar order
+// matches the bot's mutex expectations.
+flip_to_put  = barstate.isconfirmed and regime == "call" and not na(regime_flip_level) and close < regime_flip_level
+flip_to_call = barstate.isconfirmed and regime == "put"  and not na(regime_flip_level) and close > regime_flip_level
+
+if flip_to_put
+    if call_state == 1 or call_state == 2
+        call_state := 3
+        alert(f_payload("setup_ended", "call", close, NA_F, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
+    regime := "put"
+    regime_dominant_low  := low
+    regime_dominant_high := na
+    regime_flip_level    := last_5m_fractal_high
+    if put_state == 0
+        put_state := 1
+        alert(f_payload("pre_signal", "put", put_reference_low, put_reference_low, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
+
+if flip_to_call
+    if put_state == 1 or put_state == 2
+        put_state := 3
+        alert(f_payload("setup_ended", "put", close, NA_F, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
+    regime := "call"
+    regime_dominant_high := high
+    regime_dominant_low  := na
+    regime_flip_level    := last_5m_fractal_low
+    if call_state == 0
+        call_state := 1
+        alert(f_payload("pre_signal", "call", call_reference_high, call_reference_high, NA_F, NA_F, NA_F), alert.freq_once_per_bar_close)
+
+// ============================================================================
 // CALL SIDE
 // ============================================================================
 // G.5.0: simplified to index-side conditions only.
@@ -258,7 +349,7 @@ prev_trend_bearish := trend_bearish
 // Until then, every fractal break fires pre_signal.
 call_setup_active = trend_bullish
 
-if barstate.isconfirmed and call_state == 0 and call_setup_active
+if barstate.isconfirmed and call_state == 0 and call_setup_active and regime == "call"
     call_state := 1
     // G.5.7: trigger_price reports call_reference_high (the
     // leg-aware structural reference set when a new leg low
@@ -320,7 +411,7 @@ if call_state == 3 and not call_setup_active
 // ============================================================================
 put_setup_active = trend_bearish
 
-if barstate.isconfirmed and put_state == 0 and put_setup_active
+if barstate.isconfirmed and put_state == 0 and put_setup_active and regime == "put"
     put_state := 1
     // G.5.1: trigger_price reports the 1m fractal low. See CALL-side
     // comment above for rationale.
