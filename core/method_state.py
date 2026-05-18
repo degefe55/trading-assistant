@@ -1263,7 +1263,7 @@ def _send_entry_alert(ticker, direction, signal_id, entry_price,
                 else "TP3: VWAP +3σ <i>(not available)</i>")
 
     text = (
-        f"🟢 <b>ENTRY SIGNAL — {ticker} {side}</b>\n"
+        f"🔴 <b>ENTRY SIGNAL — {ticker} {side}</b>\n"
         f"Trigger: <code>{_fmt(entry_price)}</code> "
         f"(5m close {op} <code>{_fmt(trigger_level)}</code>)\n"
         f"Stop: <code>{_fmt(levels.get('stop'))}</code>\n"
