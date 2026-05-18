@@ -225,29 +225,12 @@ f_payload(string _event, string _dir, float _trigger, float _stop, float _tp1, f
 // Typed na constant we can pass to f_payload without errors
 float NA_F = na
 
-// ============================================================================
-// DIRECTION FLIP DETECTION (G.5.3)
-// Fires when the setup regime swings from one side to the other.
-// Friend's actionable alert: if he has an open contract trade, a
-// regime flip is a flag to reassess. Detection runs BEFORE the
-// per-direction state machines so the alert fires on the same bar
-// the new setup arms (not the bar after). Cold-start safe: the
-// flip requires prev=true → current=true on the opposite side, so
-// the false-initialized prev_ vars can't false-fire on bar 0.
-// ============================================================================
-var bool prev_trend_bullish = false
-var bool prev_trend_bearish = false
-
-direction_flip_to_put  = prev_trend_bullish and trend_bearish
-direction_flip_to_call = prev_trend_bearish and trend_bullish
-
-if direction_flip_to_put
-    alert(f_payload("direction_flip", "put", close, last_5m_fractal_high, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
-if direction_flip_to_call
-    alert(f_payload("direction_flip", "call", close, last_5m_fractal_low, NA_F, NA_F, NA_F), alert.freq_once_per_bar)
-
-prev_trend_bullish := trend_bullish
-prev_trend_bearish := trend_bearish
+// G.5.9 — legacy direction_flip block removed. The regime
+// filter from G.5.8 (close past regime_flip_level) is the
+// sole structural direction authority. The old block fired
+// on trend_bullish/trend_bearish transitions which were too
+// sensitive and produced ping-pong alerts (May 17 2026
+// user report).
 
 // ============================================================================
 // REGIME FILTER (G.5.8)
