@@ -1233,7 +1233,7 @@ def _send_pre_signal_alert(ticker, direction, trigger_level, levels):
 
     text = (
         f"⚡ <b>PRE-SIGNAL — {ticker} {side}</b>\n"
-        f"Setup forming: index fractal break (G.5.0)\n"
+        f"Setup forming: index fractal break (G.5.9)\n"
         f"{watch_line}\n"
         f"Stand by for entry signal."
     )
