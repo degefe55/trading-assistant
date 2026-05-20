@@ -21,7 +21,7 @@ import math
 import threading
 from datetime import datetime
 
-from config import (KSA_TZ, METHOD_TICKER, METHOD_MAX_DAILY_SIGNALS,
+from config import (KSA_TZ, METHOD_TICKER,
                     METHOD_TELEGRAM_TP_HITS_ENABLED)
 from core import method_option, sheets, telegram_client
 from core.logger import log_event
@@ -240,20 +240,9 @@ class MethodSignalTracker:
     def _open_pre_signal(self, direction: str, details: dict,
                           bars_5m: list, last_close, ticker: str,
                           silent: bool = False) -> dict:
-        """NO_SETUP → PRE_SIGNAL. Daily-cap check first; abort if hit."""
+        """NO_SETUP → PRE_SIGNAL."""
         now = datetime.now(KSA_TZ)
         date_str = now.strftime("%Y-%m-%d")
-
-        cd = sheets.read_method_cooldown(date_str, direction) or {}
-        try:
-            count_today = int(cd.get("SetupCount", 0) or 0)
-        except (ValueError, TypeError):
-            count_today = 0
-        if count_today >= METHOD_MAX_DAILY_SIGNALS:
-            log_event("INFO", "method",
-                      f"{direction} pre-signal suppressed: daily cap "
-                      f"hit ({count_today}/{METHOD_MAX_DAILY_SIGNALS})")
-            return {"state": NO_SETUP, "capped": True}
 
         # Build signal_id: YYYYMMDD-HHMM-METHOD-CALL or -PUT
         signal_id = (f"{now.strftime('%Y%m%d-%H%M')}-METHOD-"
@@ -555,17 +544,6 @@ class MethodSignalTracker:
         now = datetime.now(KSA_TZ)
         date_str = now.strftime("%Y-%m-%d")
 
-        cd = sheets.read_method_cooldown(date_str, direction) or {}
-        try:
-            count_today = int(cd.get("SetupCount", 0) or 0)
-        except (ValueError, TypeError):
-            count_today = 0
-        if count_today >= METHOD_MAX_DAILY_SIGNALS:
-            log_event("INFO", "method",
-                      f"{direction} pre_signal suppressed: daily cap "
-                      f"({count_today}/{METHOD_MAX_DAILY_SIGNALS})")
-            return {"ok": True, "capped": True}
-
         signal_id = _make_signal_id(direction)
         trigger = _safe_num(payload.get("trigger_price"))
         stop = _safe_num(payload.get("stop_price"))
@@ -622,19 +600,8 @@ class MethodSignalTracker:
             return {"ok": True, "noop": "already_tracking"}
 
         # No prior pre_signal: open inline (TradingView may collapse the
-        # two events on a fast setup). Daily cap still gates here so an
-        # entry-without-pre-signal can't exceed the limit.
+        # two events on a fast setup).
         if cur_state == NO_SETUP or not signal_id:
-            cd = sheets.read_method_cooldown(date_str, direction) or {}
-            try:
-                count_today = int(cd.get("SetupCount", 0) or 0)
-            except (ValueError, TypeError):
-                count_today = 0
-            if count_today >= METHOD_MAX_DAILY_SIGNALS:
-                log_event("INFO", "method",
-                          f"{direction} entry suppressed: daily cap "
-                          f"({count_today}/{METHOD_MAX_DAILY_SIGNALS})")
-                return {"ok": True, "capped": True}
             signal_id = _make_signal_id(direction)
             sheets.bump_method_cooldown(date_str, direction, "SetupCount")
 
@@ -943,9 +910,8 @@ def get_today_counters() -> dict:
           "put":  {... same shape ...},
         }
 
-    Reads up to 200 most-recent rows (bounded by daily cap of
-    METHOD_MAX_DAILY_SIGNALS × 2 directions) and filters by today's
-    Date. Counters use the row state, not the strict event sequence —
+    Reads up to 200 most-recent rows and filters by today's Date.
+    Counters use the row state, not the strict event sequence —
     e.g. a row that reached TRACKING is counted as both a setup and
     an entry.
 
@@ -1233,7 +1199,7 @@ def _send_pre_signal_alert(ticker, direction, trigger_level, levels):
 
     text = (
         f"⚡ <b>PRE-SIGNAL — {ticker} {side}</b>\n"
-        f"Setup forming: index fractal break (G.5.9)\n"
+        f"Setup forming: index fractal break (G.5.10)\n"
         f"{watch_line}\n"
         f"Stand by for entry signal."
     )
@@ -1262,8 +1228,9 @@ def _send_entry_alert(ticker, direction, signal_id, entry_price,
                 if tp3 not in (None, "")
                 else "TP3: VWAP +3σ <i>(not available)</i>")
 
+    emoji = "🟢" if side == "CALL" else "🔴"
     text = (
-        f"🔴 <b>ENTRY SIGNAL — {ticker} {side}</b>\n"
+        f"{emoji} <b>ENTRY SIGNAL — {ticker} {side}</b>\n"
         f"Trigger: <code>{_fmt(entry_price)}</code> "
         f"(5m close {op} <code>{_fmt(trigger_level)}</code>)\n"
         f"Stop: <code>{_fmt(levels.get('stop'))}</code>\n"

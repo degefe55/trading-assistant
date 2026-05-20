@@ -4,7 +4,7 @@ Locked May 9, 2026. To build when Webull OpenAPI access is approved (1-3 busines
 
 ## Context
 
-Pine indicator (G.5.9+) detects index-side fractal break and fires pre_signal. The bot then needs to:
+Pine indicator (G.5.10+) detects index-side fractal break and fires pre_signal. The bot then needs to:
 1. Fetch the SPX 0DTE option chain from Webull
 2. Pick the right contract per the method
 3. Verify MACD on that contract

@@ -3,7 +3,7 @@
 // Attach to: CAPITALCOM:US500 on 5-minute chart
 
 //@version=6
-indicator("Option Method (Phase G.5.9)", overlay=true, max_lines_count=50, max_labels_count=50)
+indicator("Option Method (Phase G.5.10)", overlay=true, max_lines_count=50, max_labels_count=50)
 
 // Workaround for Pine's str.tostring(na) → "NaN" (not valid JSON). See G.4.4.
 f_num(v) => na(v) ? "null" : str.tostring(v)

@@ -173,7 +173,10 @@ METHOD_TICKER = os.getenv("METHOD_TICKER", "ES.FUT")
 # into the contract picker in Phase G.3.
 METHOD_OPTION_PRICE_MIN = float(os.getenv("METHOD_OPTION_PRICE_MIN", "3.00"))
 METHOD_OPTION_PRICE_MAX = float(os.getenv("METHOD_OPTION_PRICE_MAX", "3.90"))
-METHOD_MAX_DAILY_SIGNALS = int(os.getenv("METHOD_MAX_DAILY_SIGNALS", "20"))
+# METHOD_MAX_DAILY_SIGNALS removed 2026-05-21 per user — the daily
+# cap was suppressing valid setups on busy days. SetupCount is still
+# bumped in MethodCooldown for /menu and /method status visibility,
+# but no gate enforces a maximum.
 # G.5.3 — Telegram surface toggle for index-level TP hits and the
 # setup_ended event. Default off: friend's exit decisions happen on
 # the option contract chart, so index-level TP pings are noise.

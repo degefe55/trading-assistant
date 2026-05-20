@@ -1177,8 +1177,7 @@ def _cmd_method(args: list) -> str:
 def _cmd_method_status() -> str:
     from config import (METHOD_ENABLED as PY_METHOD_ENABLED,
                         METHOD_INTERVAL_SEC as PY_INT,
-                        METHOD_TICKER as PY_TICKER,
-                        METHOD_MAX_DAILY_SIGNALS as PY_CAP)
+                        METHOD_TICKER as PY_TICKER)
 
     cfg = sheets.read_config() or {}
     raw = cfg.get("METHOD_ENABLED")
@@ -1235,7 +1234,6 @@ def _cmd_method_status() -> str:
     lines.append(f"Ticker: <code>{PY_TICKER}</code>")
     lines.append(f"Polling interval (dormant): "
                  f"every <code>{interval_sec}</code> sec")
-    lines.append(f"Daily cap: <code>{PY_CAP}</code> per direction")
     lines.append(f"Last tick started: <code>{last_started}</code>")
     lines.append(f"Last tick completed: <code>{last_completed}</code>")
     lines.append("")
@@ -1244,8 +1242,8 @@ def _cmd_method_status() -> str:
     lines.append(f"  PUT:  <code>{_fmt_dir('put')}</code>")
     lines.append("")
     lines.append("<b>📅 Today's setup count</b>")
-    lines.append(f"  CALL: {cd_call.get('SetupCount', 0) or 0}/{PY_CAP}")
-    lines.append(f"  PUT:  {cd_put.get('SetupCount', 0) or 0}/{PY_CAP}")
+    lines.append(f"  CALL: {cd_call.get('SetupCount', 0) or 0}")
+    lines.append(f"  PUT:  {cd_put.get('SetupCount', 0) or 0}")
     return "\n".join(lines)
 
 

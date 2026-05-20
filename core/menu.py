@@ -36,7 +36,7 @@ import os
 from datetime import datetime
 
 from config import (KSA_TZ, ACTIVE_MARKETS, MOCK_MODE, MAX_LOG_ROWS,
-                    METHOD_TICKER, METHOD_MAX_DAILY_SIGNALS,
+                    METHOD_TICKER,
                     TRADINGVIEW_WEBHOOK_SECRET,
                     METHOD_ENABLED as PY_METHOD_ENABLED,
                     WATCHER_ENABLED as PY_WATCHER_ENABLED,
@@ -716,7 +716,6 @@ def render_method() -> tuple:
             return "<i>idle</i>"
         return state
 
-    cap = METHOD_MAX_DAILY_SIGNALS
     cc = counters.get("call", {}) if counters else {}
     cp = counters.get("put", {}) if counters else {}
 
@@ -729,7 +728,6 @@ def render_method() -> tuple:
         f"Webhook secret: "
         f"{'✅ set' if health.get('secret_set') else '⚠️ not set'}",
         f"Ticker: <code>{METHOD_TICKER}</code>",
-        f"Daily cap: <code>{cap}</code> per direction",
         "",
         "<b>📡 Webhook activity</b>",
     ]
@@ -768,8 +766,8 @@ def render_method() -> tuple:
         f"  PUT:  {_fmt_dir('put')}",
         "",
         "<b>📅 Today's activity</b>",
-        f"  Setups:        CALL {cc.get('setups', 0)}/{cap} · "
-        f"PUT {cp.get('setups', 0)}/{cap}",
+        f"  Setups:        CALL {cc.get('setups', 0)} · "
+        f"PUT {cp.get('setups', 0)}",
         f"  Entries:       CALL {cc.get('entries', 0)} · "
         f"PUT {cp.get('entries', 0)}",
         f"  TP1 hits:      CALL {cc.get('tp1_hits', 0)} · "

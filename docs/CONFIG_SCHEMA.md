@@ -105,7 +105,7 @@ For completeness, the bot also stores runtime state in these tabs:
 | `MessageMap` | `MessageID, Date, Time_KSA, BriefType, RecIDs` | `sheets.record_message_recids` / `sheets.get_recids_for_message` | Maps Telegram message_id → which RecIDs the message covered, for threaded replies |
 | `WatcherCooldown` | `Ticker, Date, AlertCount` | `sheets.read_cooldowns_for_date` / `sheets.bump_cooldown` | Per-ticker daily alert counter |
 | `MethodSignals` | `SignalID, Date, Time_KSA, Direction, State, TriggerPrice, StopPrice, TP1, TP2, TP3, TP1Hit, TP2Hit, TP3Hit, InvalidatedAt, StateUpdatedAt, Source` | `sheets.write_method_state` / `sheets.read_method_signals` / `sheets.read_active_method_signals` | One row per option-method signal lifecycle, upserted on each state transition |
-| `MethodCooldown` | `Date, Direction, LastPreSignalAt, LastEntryAt, SetupCount` | `sheets.read_method_cooldown` / `sheets.bump_method_cooldown` / `sheets.reset_method_cooldown` | Per-direction daily setup counter (cap is `METHOD_MAX_DAILY_SIGNALS`) |
+| `MethodCooldown` | `Date, Direction, LastPreSignalAt, LastEntryAt, SetupCount` | `sheets.read_method_cooldown` / `sheets.bump_method_cooldown` / `sheets.reset_method_cooldown` | Per-direction daily setup counter (informational; no enforced cap as of G.5.10) |
 | `Halal_Approved` | `Ticker, Market, Source, LastVerified` | (read by Saudi screening, currently advisory) | Manually maintained whitelist |
 | `Patterns` / `Reports` | misc analysis outputs | weekly review prompts | Lower-priority |
 
